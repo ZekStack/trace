@@ -20,6 +20,8 @@ TraceResult end(uint32_t timeoutMs = 5000);
 
 void onFlush(TraceFlushCallback callback);
 void onLog(TraceLogCallback callback);
+void setStream(Print *stream);
+Print *getStream();
 
 TraceResult attachTempo(Tempo &tempo, const TraceTempoConfig &config = TraceTempoConfig());
 void detachTempo();
@@ -84,3 +86,16 @@ With Tempo, `formatted` uses:
 `onLog()` is for realtime observation. `onFlush()` is for persistence. Both callbacks run from the internal Trace task and are `std::function` callbacks, so `std::bind` and lambdas with captures are supported.
 
 Callbacks should avoid long blocking work and should not recursively log through the same Trace instance.
+
+## Stream output
+
+`setStream()` writes formatted realtime logs to any Arduino `Print` stream.
+
+```cpp
+trace.setStream(&Serial);
+trace.setStream(&Serial1);
+trace.setStream(&client);
+trace.setStream(nullptr);
+```
+
+Trace does not own the stream. Keep the stream alive while it is attached. Stream output runs from the internal Trace task, uses the same formatted text as `onLog()`, and coexists with `onLog()` when both are configured.

@@ -30,16 +30,13 @@ Trace trace;
 
 void setup() {
 	Serial.begin(115200);
+	trace.setStream(&Serial);
 
 	TraceResult result = trace.init();
 	if (!result) {
 		Serial.println(result.message.c_str());
 		return;
 	}
-
-	trace.onLog([](const TraceLog &log) {
-		Serial.println(log.formatted.c_str());
-	});
 
 	trace.info("BOOT", "Trace initialized");
 }
@@ -48,6 +45,9 @@ void loop() {
 	delay(1000);
 }
 ```
+
+`setStream()` accepts any Arduino `Print` implementation. Use `trace.setStream(&Serial1)`,
+`trace.setStream(&client)`, or `trace.setStream(nullptr)` to change or disable stream output.
 
 ## Persistence
 

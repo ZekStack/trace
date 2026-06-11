@@ -69,6 +69,7 @@ struct TraceImpl {
 	std::vector<TraceLog> pendingLogs;
 	TraceFlushCallback onFlush;
 	TraceLogCallback onLog;
+	Print *stream = nullptr;
 	Tempo *tempo = nullptr;
 	bool initialized = false;
 	bool stopping = false;
@@ -280,6 +281,7 @@ struct TraceImpl {
 
 	void processRealtimeLogs() {
 		TraceLogCallback callback;
+		Print *streamSnapshot = nullptr;
 		std::vector<TraceLog> logs;
 		{
 			TraceLock lock(mutex);
@@ -287,7 +289,8 @@ struct TraceImpl {
 				return;
 			}
 			callback = onLog;
-			if (!callback) {
+			streamSnapshot = stream;
+			if (!callback && streamSnapshot == nullptr) {
 				lastOnLogSequence = nextSequence > 0 ? nextSequence - 1 : 0;
 				return;
 			}
@@ -303,7 +306,12 @@ struct TraceImpl {
 
 		for (TraceLog &log : logs) {
 			formatLog(log);
-			callback(log);
+			if (streamSnapshot != nullptr) {
+				streamSnapshot->println(log.formatted.c_str());
+			}
+			if (callback) {
+				callback(log);
+			}
 		}
 	}
 
@@ -607,6 +615,21 @@ void Trace::onLog(TraceLogCallback callback) {
 	if (lock) {
 		_impl->onLog = callback;
 	}
+}
+
+void Trace::setStream(Print *stream) {
+	TraceLock lock(_impl->mutex);
+	if (lock) {
+		_impl->stream = stream;
+	}
+}
+
+Print *Trace::getStream() {
+	TraceLock lock(_impl->mutex);
+	if (!lock) {
+		return nullptr;
+	}
+	return _impl->stream;
 }
 
 TraceResult Trace::attachTempo(Tempo &tempo, const TraceTempoConfig &config) {

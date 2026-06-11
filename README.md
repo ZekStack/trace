@@ -56,16 +56,13 @@ Trace trace;
 
 void setup() {
 	Serial.begin(115200);
+	trace.setStream(&Serial);
 
 	TraceResult result = trace.init();
 	if (!result) {
 		Serial.println(result.message.c_str());
 		return;
 	}
-
-	trace.onLog([](const TraceLog &log) {
-		Serial.println(log.formatted.c_str());
-	});
 
 	trace.info("BOOT", "Trace is ready");
 }
@@ -82,6 +79,7 @@ void loop() {
 
 * `maxRecentLogs` controls queryable in-RAM history.
 * `maxPendingLogs` controls unsaved logs waiting for flush.
+* `setStream()` writes formatted realtime logs to any Arduino `Print` stream such as `Serial`, `Serial1`, `WiFiClient`, or a custom sink.
 * `onLog()` is for realtime observation; `onFlush()` is for persistence.
 * Callbacks should avoid long blocking work and should not recursively call Trace logging methods.
 * Stack sizes are FreeRTOS byte sizes on ESP32 and must be at least 1024 bytes.
@@ -122,6 +120,7 @@ Detailed documentation is available in the `docs/` folder.
 ```cpp
 Trace trace;
 trace.init();
+trace.setStream(&Serial);
 trace.onLog([](const TraceLog &log) {});
 trace.onFlush([](const TraceLogBatch &batch) {
 	return TraceFlushResult::Ok;

@@ -159,6 +159,8 @@ class Trace {
 
 	void onFlush(TraceFlushCallback callback);
 	void onLog(TraceLogCallback callback);
+	void setStream(Print *stream);
+	Print *getStream();
 
 	TraceResult attachTempo(Tempo &tempo, const TraceTempoConfig &config = TraceTempoConfig());
 	void detachTempo();
