@@ -1,6 +1,6 @@
 # Configuration
 
-`TraceConfig` controls the internal task, log limits, flush timing, overflow behavior, JSON formatting, and level filtering.
+`TraceConfig` controls the internal task, log limits, flush timing, overflow behavior, JSON formatting, level filtering, and stream colors.
 
 ```cpp
 TraceConfig config;
@@ -16,6 +16,7 @@ config.flushOnError = true;
 config.overflowPolicy = TraceOverflowPolicy::DropOldestPending;
 config.jsonFormat = TraceJsonFormat::Compact;
 config.minLevel = TraceLevel::Debug;
+config.enableColors = true;
 config.blockCallerTimeoutMs = 1000;
 ```
 
@@ -53,3 +54,9 @@ Stack sizes are ESP32 FreeRTOS byte sizes and must be at least 1024 bytes.
 `TraceStackType::Internal` forces normal task creation.
 
 `TraceStackType::Psram` requires PSRAM task-stack support and fails clearly when unavailable.
+
+## Stream colors
+
+`enableColors` controls ANSI color codes for `setStream()` output. It defaults to `true`.
+
+Callbacks, flush batches, and query helpers keep `TraceLog::formatted` as plain text even when stream colors are enabled.

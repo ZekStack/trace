@@ -96,6 +96,7 @@ struct TraceConfig {
 	TraceOverflowPolicy overflowPolicy = TraceOverflowPolicy::DropOldestPending;
 	TraceJsonFormat jsonFormat = TraceJsonFormat::Compact;
 	TraceLevel minLevel = TraceLevel::Debug;
+	bool enableColors = true;
 	uint32_t blockCallerTimeoutMs = 1000;
 	const char *taskName = "trace-task";
 };

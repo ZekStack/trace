@@ -80,6 +80,7 @@ void loop() {
 * `maxRecentLogs` controls queryable in-RAM history.
 * `maxPendingLogs` controls unsaved logs waiting for flush.
 * `setStream()` writes formatted realtime logs to any Arduino `Print` stream such as `Serial`, `Serial1`, `WiFiClient`, or a custom sink.
+* Stream output uses ANSI colors by default. Callback, flush, and query `TraceLog::formatted` values stay plain text.
 * `onLog()` is for realtime observation; `onFlush()` is for persistence.
 * Callbacks should avoid long blocking work and should not recursively call Trace logging methods.
 * Stack sizes are FreeRTOS byte sizes on ESP32 and must be at least 1024 bytes.
@@ -159,6 +160,7 @@ config.maxPendingLogs = 50;
 config.flushEveryLogs = 20;
 config.flushIntervalMs = 30000;
 config.overflowPolicy = TraceOverflowPolicy::DropOldestPending;
+config.enableColors = true;
 
 TraceResult result = trace.init(config);
 ```

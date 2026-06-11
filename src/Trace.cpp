@@ -282,6 +282,7 @@ struct TraceImpl {
 	void processRealtimeLogs() {
 		TraceLogCallback callback;
 		Print *streamSnapshot = nullptr;
+		bool colorsEnabled = true;
 		std::vector<TraceLog> logs;
 		{
 			TraceLock lock(mutex);
@@ -290,6 +291,7 @@ struct TraceImpl {
 			}
 			callback = onLog;
 			streamSnapshot = stream;
+			colorsEnabled = config.enableColors;
 			if (!callback && streamSnapshot == nullptr) {
 				lastOnLogSequence = nextSequence > 0 ? nextSequence - 1 : 0;
 				return;
@@ -307,7 +309,14 @@ struct TraceImpl {
 		for (TraceLog &log : logs) {
 			formatLog(log);
 			if (streamSnapshot != nullptr) {
-				streamSnapshot->println(log.formatted.c_str());
+				const char *color = colorsEnabled ? levelColor(log.level) : "";
+				if (color[0] != '\0') {
+					streamSnapshot->print(color);
+					streamSnapshot->print(log.formatted.c_str());
+					streamSnapshot->println("\033[0m");
+				} else {
+					streamSnapshot->println(log.formatted.c_str());
+				}
 			}
 			if (callback) {
 				callback(log);
@@ -446,17 +455,34 @@ struct TraceImpl {
 	static const char *levelName(TraceLevel level) {
 		switch (level) {
 		case TraceLevel::Debug:
-			return "DEBUG";
+			return "D";
 		case TraceLevel::Info:
-			return "INFO";
+			return "I";
 		case TraceLevel::Warn:
-			return "WARN";
+			return "W";
 		case TraceLevel::Error:
-			return "ERROR";
+			return "E";
 		case TraceLevel::Fatal:
-			return "FATAL";
+			return "F";
 		default:
-			return "UNKNOWN";
+			return "?";
+		}
+	}
+
+	static const char *levelColor(TraceLevel level) {
+		switch (level) {
+		case TraceLevel::Debug:
+			return "\033[2;37m";
+		case TraceLevel::Info:
+			return "\033[32m";
+		case TraceLevel::Warn:
+			return "\033[33m";
+		case TraceLevel::Error:
+			return "\033[31m";
+		case TraceLevel::Fatal:
+			return "\033[1;91m";
+		default:
+			return "";
 		}
 	}
 };

@@ -72,14 +72,16 @@ std::vector<TraceLog> getLogsByTag(const char *tag);
 Without Tempo, `formatted` uses:
 
 ```txt
-[LEVEL][TAG] - Message
+[L][TAG] - Message
 ```
 
 With Tempo, `formatted` uses:
 
 ```txt
-[LEVEL][TAG](time) - Message
+[L][TAG](time) - Message
 ```
+
+`L` is the short level label: `D`, `I`, `W`, `E`, `F`, or `?`.
 
 ## Callbacks
 
@@ -98,4 +100,6 @@ trace.setStream(&client);
 trace.setStream(nullptr);
 ```
 
-Trace does not own the stream. Keep the stream alive while it is attached. Stream output runs from the internal Trace task, uses the same formatted text as `onLog()`, and coexists with `onLog()` when both are configured.
+Trace does not own the stream. Keep the stream alive while it is attached. Stream output runs from the internal Trace task and coexists with `onLog()` when both are configured.
+
+Stream output uses ANSI colors by default when `TraceConfig::enableColors` is `true`. `onLog()`, `onFlush()`, and query helpers receive plain `TraceLog::formatted` text without color codes.
