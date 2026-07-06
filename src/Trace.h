@@ -112,9 +112,11 @@ struct TraceConfig {
 	BaseType_t coreId = tskNO_AFFINITY;
 	TraceStackType stackType = TraceStackType::Auto;
 	TraceStorageMemory storageMemory = TraceStorageMemory::Internal;
+	TraceStorageMemory realtimeStorageMemory = TraceStorageMemory::Internal;
 	size_t maxRecentLogs = 100;
 	size_t maxRealtimeLogs = 100;
 	size_t maxPendingLogs = 50;
+	size_t maxFlushBatchLogs = 0;
 	size_t flushEveryLogs = 20;
 	uint32_t flushIntervalMs = 30000;
 	uint32_t retryIntervalMs = 1000;

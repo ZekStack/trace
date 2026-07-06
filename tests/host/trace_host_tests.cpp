@@ -537,6 +537,23 @@ void storageAllocationPolicies(TestRunner &runner) {
 
 	resetClock();
 	trace_host_heap::reset();
+	trace_host_heap::psramAvailable = true;
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.realtimeStorageMemory = TraceStorageMemory::PreferPsram;
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		runner.check(trace.init(config), "init realtime PreferPsram storage");
+		TraceDiag diag = trace.getDiagnostics();
+		runner.check(diag.realtimeLogsInPsram, "PreferPsram realtime uses PSRAM");
+		runner.check(diag.realtimeAllocatedBytes > 0, "PreferPsram realtime bytes reported");
+		runner.check(trace.end(), "end realtime PreferPsram storage");
+	}
+
+	resetClock();
+	trace_host_heap::reset();
 	{
 		Trace trace;
 		TraceConfig config = baseConfig();
@@ -549,6 +566,39 @@ void storageAllocationPolicies(TestRunner &runner) {
 		runner.check(!diag.recentLogsInPsram, "PreferPsram recent falls back to internal");
 		runner.check(!diag.pendingLogsInPsram, "PreferPsram pending falls back to internal");
 		runner.check(trace.end(), "end PreferPsram fallback storage");
+	}
+
+	resetClock();
+	trace_host_heap::reset();
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.realtimeStorageMemory = TraceStorageMemory::PreferPsram;
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		runner.check(trace.init(config), "init realtime PreferPsram fallback storage");
+		TraceDiag diag = trace.getDiagnostics();
+		runner.check(!diag.realtimeLogsInPsram, "PreferPsram realtime falls back to internal");
+		runner.check(diag.realtimeAllocatedBytes > 0, "PreferPsram fallback realtime bytes reported");
+		runner.check(trace.end(), "end realtime PreferPsram fallback storage");
+	}
+
+	resetClock();
+	trace_host_heap::reset();
+	trace_host_heap::psramAvailable = true;
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.realtimeStorageMemory = TraceStorageMemory::RequirePsram;
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		runner.check(trace.init(config), "init realtime RequirePsram storage");
+		TraceDiag diag = trace.getDiagnostics();
+		runner.check(diag.realtimeLogsInPsram, "RequirePsram realtime uses PSRAM");
+		runner.check(diag.realtimeAllocatedBytes > 0, "RequirePsram realtime bytes reported");
+		runner.check(trace.end(), "end realtime RequirePsram storage");
 	}
 
 	resetClock();
@@ -569,6 +619,42 @@ void storageAllocationPolicies(TestRunner &runner) {
 		    trace_host_heap::activeAllocations == 0,
 		    "RequirePsram failure leaves no allocations"
 		);
+	}
+
+	resetClock();
+	trace_host_heap::reset();
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.realtimeStorageMemory = TraceStorageMemory::RequirePsram;
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		TraceResult result = trace.init(config);
+		runner.check(
+		    !result && result.status == TraceStatus::OutOfMemory,
+		    "realtime RequirePsram fails without PSRAM"
+		);
+		runner.check(
+		    trace_host_heap::activeAllocations == 0,
+		    "realtime RequirePsram failure leaves no allocations"
+		);
+	}
+
+	resetClock();
+	trace_host_heap::reset();
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.realtimeStorageMemory = TraceStorageMemory::RequirePsram;
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 0;
+		config.maxPendingLogs = 2;
+		runner.check(trace.init(config), "disabled realtime RequirePsram succeeds");
+		TraceDiag diag = trace.getDiagnostics();
+		runner.check(diag.realtimeAllocatedBytes == 0, "disabled realtime allocates no bytes");
+		runner.check(!diag.realtimeLogsInPsram, "disabled realtime does not report PSRAM");
+		runner.check(trace.end(), "end disabled realtime RequirePsram");
 	}
 }
 
@@ -656,6 +742,171 @@ void directCStringDoesNotAllocateAfterInit(TestRunner &runner) {
 	    "long direct C-string truncation counted once"
 	);
 	runner.check(longTrace.end(), "end directCStringDoesNotAllocateAfterInit long");
+}
+
+void cappedFlushBarriers(TestRunner &runner) {
+	resetClock();
+	{
+		Trace trace;
+		std::vector<size_t> batchSizes;
+		trace.onFlush([&batchSizes](const TraceLogBatch &batch) {
+			batchSizes.push_back(batch.size());
+			return TraceFlushResult::Ok;
+		});
+		TraceConfig config = baseConfig();
+		config.maxPendingLogs = 4;
+		config.maxFlushBatchLogs = 0;
+		runner.check(trace.init(config), "init uncapped flush batch");
+		trace.info("B", "one");
+		trace.info("B", "two");
+		trace.info("B", "three");
+		runner.check(trace.flushAndWait(1000), "flush uncapped batch");
+		runner.check(batchSizes.size() == 1 && batchSizes[0] == 3, "uncapped flush uses one batch");
+		runner.check(trace.end(), "end uncapped flush batch");
+	}
+
+	resetClock();
+	{
+		Trace trace;
+		std::vector<std::vector<uint64_t>> batches;
+		trace.onFlush([&batches](const TraceLogBatch &batch) {
+			std::vector<uint64_t> sequences;
+			for (const TraceLog &log : batch.logs) {
+				sequences.push_back(log.sequence);
+			}
+			batches.push_back(sequences);
+			return TraceFlushResult::Ok;
+		});
+		TraceConfig config = baseConfig();
+		config.maxPendingLogs = 5;
+		config.maxFlushBatchLogs = 2;
+		runner.check(trace.init(config), "init capped flush split");
+		for (int i = 1; i <= 5; ++i) {
+			runner.check(trace.infof("B", "item=%d", i), "capped split log");
+		}
+		runner.check(trace.flushAndWait(1000), "flush capped split");
+		runner.check(
+		    batches.size() == 3 && batches[0].size() == 2 && batches[0][0] == 1 &&
+		        batches[0][1] == 2 && batches[1].size() == 2 && batches[1][0] == 3 &&
+		        batches[1][1] == 4 && batches[2].size() == 1 && batches[2][0] == 5,
+		    "capped flush splits oldest-to-newest"
+		);
+		runner.check(trace.end(), "end capped flush split");
+	}
+
+	resetClock();
+	{
+		Trace trace;
+		std::vector<std::vector<uint64_t>> batches;
+		bool appendedDuringFlush = false;
+		trace.onFlush([&trace, &batches, &appendedDuringFlush](const TraceLogBatch &batch) {
+			std::vector<uint64_t> sequences;
+			for (const TraceLog &log : batch.logs) {
+				sequences.push_back(log.sequence);
+			}
+			batches.push_back(sequences);
+			if (!appendedDuringFlush) {
+				appendedDuringFlush = true;
+				trace.info("B", "late");
+			}
+			return TraceFlushResult::Ok;
+		});
+		TraceConfig config = baseConfig();
+		config.maxPendingLogs = 5;
+		config.maxFlushBatchLogs = 1;
+		runner.check(trace.init(config), "init capped flush barrier");
+		trace.info("B", "one");
+		trace.info("B", "two");
+		runner.check(trace.flushAndWait(1000), "flush capped barrier");
+		TraceDiag diag = trace.getDiagnostics();
+		runner.check(
+		    batches.size() == 2 && batches[0].size() == 1 && batches[0][0] == 1 &&
+		        batches[1].size() == 1 && batches[1][0] == 2,
+		    "active flush does not chase appended log"
+		);
+		runner.check(diag.pendingLogCount == 1, "late log remains pending after barrier flush");
+		runner.check(trace.flushAndWait(1000), "flush late barrier log");
+		runner.check(trace.getDiagnostics().pendingLogCount == 0, "late log flushes later");
+		runner.check(trace.end(), "end capped flush barrier");
+	}
+
+	resetClock();
+	{
+		Trace trace;
+		std::vector<std::vector<uint64_t>> batches;
+		int attempts = 0;
+		trace.onFlush([&batches, &attempts](const TraceLogBatch &batch) {
+			attempts++;
+			std::vector<uint64_t> sequences;
+			for (const TraceLog &log : batch.logs) {
+				sequences.push_back(log.sequence);
+			}
+			batches.push_back(sequences);
+			return attempts == 2 ? TraceFlushResult::Retry : TraceFlushResult::Ok;
+		});
+		TraceConfig config = baseConfig();
+		config.maxPendingLogs = 4;
+		config.maxFlushBatchLogs = 2;
+		config.retryIntervalMs = 25;
+		runner.check(trace.init(config), "init capped retry batch");
+		for (int i = 1; i <= 4; ++i) {
+			runner.check(trace.infof("R", "item=%d", i), "capped retry log");
+		}
+		runner.check(trace.flushAndWait(1000), "flush capped retry batch");
+		runner.check(
+		    batches.size() == 3 && batches[0].size() == 2 && batches[0][0] == 1 &&
+		        batches[0][1] == 2 && batches[1].size() == 2 && batches[1][0] == 3 &&
+		        batches[1][1] == 4 && batches[2].size() == 2 && batches[2][0] == 3 &&
+		        batches[2][1] == 4,
+		    "retry restarts from first remaining capped batch"
+		);
+		runner.check(trace.getDiagnostics().pendingLogCount == 0, "retry eventually clears pending");
+		runner.check(trace.end(), "end capped retry batch");
+	}
+
+	resetClock();
+	{
+		Trace trace;
+		std::vector<std::vector<uint64_t>> batches;
+		int attempts = 0;
+		bool failSecondBatch = true;
+		trace.onFlush([&batches, &attempts, &failSecondBatch](const TraceLogBatch &batch) {
+			attempts++;
+			std::vector<uint64_t> sequences;
+			for (const TraceLog &log : batch.logs) {
+				sequences.push_back(log.sequence);
+			}
+			batches.push_back(sequences);
+			if (failSecondBatch && attempts == 2) {
+				return TraceFlushResult::Failed;
+			}
+			return TraceFlushResult::Ok;
+		});
+		TraceConfig config = baseConfig();
+		config.maxPendingLogs = 4;
+		config.maxFlushBatchLogs = 2;
+		runner.check(trace.init(config), "init capped failed batch");
+		for (int i = 1; i <= 4; ++i) {
+			runner.check(trace.infof("F", "item=%d", i), "capped failed log");
+		}
+		TraceResult failed = trace.flushAndWait(1000);
+		runner.check(
+		    !failed && failed.status == TraceStatus::FlushFailed,
+		    "capped failed batch returns FlushFailed"
+		);
+		runner.check(trace.getDiagnostics().pendingLogCount == 2, "failed batch keeps remaining logs");
+		failSecondBatch = false;
+		runner.check(trace.flushAndWait(1000), "later flush retries failed batch");
+		runner.check(
+		    batches.size() == 3 && batches[0].size() == 2 && batches[0][0] == 1 &&
+		        batches[0][1] == 2 && batches[1].size() == 2 && batches[1][0] == 3 &&
+		        batches[1][1] == 4 && batches[2].size() == 2 && batches[2][0] == 3 &&
+		        batches[2][1] == 4,
+		    "failed batch restarts from first remaining capped batch"
+		);
+		runner.check(trace.getDiagnostics().pendingLogCount == 0, "failed batch later clears pending");
+		runner.check(trace.end(), "end capped failed batch");
+	}
 }
 
 void ringOrderAndSequenceConsistency(TestRunner &runner) {
@@ -749,6 +1000,7 @@ int main() {
 	partialAllocationCleanup(runner);
 	enqueueDoesNotAllocateAfterInit(runner);
 	directCStringDoesNotAllocateAfterInit(runner);
+	cappedFlushBarriers(runner);
 	ringOrderAndSequenceConsistency(runner);
 	runtimeCapClamping(runner);
 

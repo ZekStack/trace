@@ -51,7 +51,7 @@ inline bool psramAvailable() {
 inline void *allocate(
     size_t bytes,
     TraceStorageMemory memory,
-    bool realtime,
+    bool,
     AllocationInfo &info
 ) {
 	info = AllocationInfo();
@@ -60,7 +60,7 @@ inline void *allocate(
 	}
 
 	void *ptr = nullptr;
-	if (!realtime && memory != TraceStorageMemory::Internal) {
+	if (memory != TraceStorageMemory::Internal) {
 #if defined(MALLOC_CAP_SPIRAM)
 		if (psramAvailable()) {
 			ptr = heap_caps_malloc(bytes, kPsramCaps);

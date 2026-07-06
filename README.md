@@ -80,18 +80,20 @@ void loop() {
 * `maxRecentLogs` controls queryable in-RAM history only.
 * `maxRealtimeLogs` controls the realtime delivery queue used by `onLog()` and stream output.
 * `maxPendingLogs` controls unsaved logs waiting for flush.
+* `maxFlushBatchLogs` controls how many public `TraceLog` objects are converted per flush callback. `0` keeps flush batches uncapped.
 * Queue-count `0` disables that queue. Payload-cap `0` uses the compiled maximum for that payload type.
 * `setStream()` writes formatted realtime logs to any Arduino `Print` stream such as `Serial`, `Serial1`, `WiFiClient`, or a custom sink.
 * Stream output uses ANSI colors by default. Callback, flush, and query `TraceLog::formatted` values stay plain text.
 * After `Trace::init()`, accepted direct C-string log calls do not allocate on the internal enqueue path when all target queues have capacity and no output-boundary conversion is triggered.
 * Query APIs, flush batch conversion, `onLog()` conversion, stream implementations, and user-created `std::string` values may still allocate.
+* Fixed queue storage is approximately `sizeof(TraceRecord) * (maxRecentLogs + maxRealtimeLogs + maxPendingLogs)` for enabled queues. Runtime payload caps do not shrink `TraceRecord`.
 * `onLog()` is for realtime observation; `onFlush()` is for persistence.
 * Callbacks should avoid long blocking work and should not recursively call Trace logging methods.
 * Trace does not own attached `Print` or `Tempo` instances. Keep them alive until `Trace::end()` completes.
 * Detaching or replacing `Print` or `Tempo` while Trace is active does not synchronize already snapshotted worker use.
 * Stack sizes are FreeRTOS byte sizes on ESP32 and must be at least 1024 bytes.
 * `TraceStackType::Auto` prefers PSRAM task stacks when supported and falls back to internal RAM.
-* `TraceStorageMemory::PreferPsram` opts recent and pending log buffers into PSRAM with internal fallback. Realtime delivery stays internal.
+* `storageMemory` controls recent and pending log buffers. `realtimeStorageMemory` controls realtime delivery storage separately.
 
 ## Examples
 
@@ -152,7 +154,7 @@ For the full API, see [`docs/api.md`](docs/api.md).
 | Platform | `espressif32` |
 | Language | C++20 |
 | Filesystem | none |
-| PSRAM | Optional for task stacks and opt-in recent/pending log storage |
+| PSRAM | Optional for task stacks and opt-in recent, realtime, and pending log storage |
 | Dependencies | `bblanchon/ArduinoJson >= 7.0.0` |
 | Exceptions | Not used |
 | Status | Release `0.2.0` |
@@ -163,9 +165,11 @@ For the full API, see [`docs/api.md`](docs/api.md).
 TraceConfig config;
 config.stackSize = 4096;
 config.storageMemory = TraceStorageMemory::Internal;
+config.realtimeStorageMemory = TraceStorageMemory::Internal;
 config.maxRecentLogs = 100;
 config.maxRealtimeLogs = 100;
 config.maxPendingLogs = 50;
+config.maxFlushBatchLogs = 0;
 config.flushEveryLogs = 20;
 config.flushIntervalMs = 30000;
 config.retryIntervalMs = 1000;
@@ -176,6 +180,14 @@ config.maxMessageLength = 256;
 config.maxFormattedLength = 384;
 
 TraceResult result = trace.init(config);
+```
+
+Opt recent, pending, and realtime queues into PSRAM with internal fallback:
+
+```cpp
+config.storageMemory = TraceStorageMemory::PreferPsram;
+config.realtimeStorageMemory = TraceStorageMemory::PreferPsram;
+config.maxFlushBatchLogs = 25;
 ```
 
 For all options, see [`docs/configuration.md`](docs/configuration.md).

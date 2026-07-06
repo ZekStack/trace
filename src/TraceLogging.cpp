@@ -65,9 +65,11 @@ TraceResult TraceImpl::appendLog(TraceRecord record) {
 				droppedLogCount++;
 				shouldNotify = true;
 			} else if (pendingLogs.pushDropNewest(record)) {
+				lastAcceptedPendingSequence = record.sequence;
 				shouldNotify = true;
 			} else if (config.overflowPolicy == TraceOverflowPolicy::DropOldestPending) {
 				pendingLogs.pushDropOldest(record);
+				lastAcceptedPendingSequence = record.sequence;
 				droppedLogCount++;
 				shouldNotify = true;
 			} else if (config.overflowPolicy == TraceOverflowPolicy::DropNewest) {

@@ -9,9 +9,11 @@ config.priority = 1;
 config.coreId = tskNO_AFFINITY;
 config.stackType = TraceStackType::Auto;
 config.storageMemory = TraceStorageMemory::Internal;
+config.realtimeStorageMemory = TraceStorageMemory::Internal;
 config.maxRecentLogs = 100;
 config.maxRealtimeLogs = 100;
 config.maxPendingLogs = 50;
+config.maxFlushBatchLogs = 0;
 config.flushEveryLogs = 20;
 config.flushIntervalMs = 30000;
 config.retryIntervalMs = 1000;
@@ -36,7 +38,7 @@ config.maxFormattedLength = 384;
 
 `maxPendingLogs = 0` disables persistence buffering. Logs are still accepted for recent history and realtime delivery, but they are counted as dropped for persistence.
 
-Queue-count `0` means disabled. Payload-cap `0` means use the compiled maximum for that payload type.
+Queue-count `0` means disabled. Disabled queues do not allocate and do not fail `RequirePsram` policies because no queue storage is needed. Payload-cap `0` means use the compiled maximum for that payload type.
 
 ## Storage memory
 
@@ -46,11 +48,33 @@ After `Trace::init()`, accepted direct C-string log calls do not allocate on the
 
 This guarantee is intentionally narrow. Query APIs allocate `std::vector<TraceLog>`, flush batch conversion and `onLog()` conversion can allocate because public `TraceLog` contains `std::string`, stream implementations may allocate internally, and user code may allocate before passing `std::string` values to Trace.
 
-`TraceStorageMemory::Internal` is the deterministic default. Recent, realtime, and pending queues use internal-capable memory.
+`storageMemory` controls recent and pending queues. `realtimeStorageMemory` controls the realtime queue separately.
 
-`TraceStorageMemory::PreferPsram` uses PSRAM for recent and pending queues when PSRAM is available, otherwise it falls back to internal-capable memory. The realtime queue remains internal.
+`TraceStorageMemory::Internal` is the deterministic default. The selected queues use internal-capable memory.
 
-`TraceStorageMemory::RequirePsram` requires recent and pending queues to allocate in PSRAM. `init()` returns `TraceStatus::OutOfMemory` if PSRAM is unavailable or allocation fails. The realtime queue remains internal.
+`TraceStorageMemory::PreferPsram` uses PSRAM for the selected queues when PSRAM is available, otherwise it falls back to internal-capable memory.
+
+`TraceStorageMemory::RequirePsram` requires enabled selected queues to allocate in PSRAM. `init()` returns `TraceStatus::OutOfMemory` if PSRAM is unavailable or allocation fails.
+
+```cpp
+config.storageMemory = TraceStorageMemory::PreferPsram;
+config.realtimeStorageMemory = TraceStorageMemory::PreferPsram;
+config.maxFlushBatchLogs = 25;
+```
+
+Fixed queue storage is approximately:
+
+```txt
+sizeof(TraceRecord) * queue_capacity
+```
+
+Total fixed queue storage is approximately:
+
+```txt
+sizeof(TraceRecord) * (maxRecentLogs + maxRealtimeLogs + maxPendingLogs)
+```
+
+Disabled queues do not contribute to this total. Runtime payload caps such as `maxTagLength` and `maxMessageLength` do not shrink `TraceRecord`; compile-time caps do. `TraceDiag::recentAllocatedBytes`, `TraceDiag::realtimeAllocatedBytes`, `TraceDiag::pendingAllocatedBytes`, and the matching `*InPsram` flags are the runtime source of truth.
 
 ## Payload limits
 
@@ -84,13 +108,25 @@ Trace flushes pending logs when:
 
 `retryIntervalMs` controls the delay after `TraceFlushResult::Retry`. Values smaller than the worker poll interval are clamped so retry cannot spin in a tight loop. Normal flush requests set `flushRequested` but do not clear or bypass the retry deadline. Urgent error and fatal flush requests may bypass the retry deadline.
 
+`maxFlushBatchLogs` controls only public flush callback batch conversion size.
+
+When `maxFlushBatchLogs == 0`, Trace converts all currently selected pending logs into one `TraceLogBatch`.
+
+When `maxFlushBatchLogs > 0`, Trace converts at most `maxFlushBatchLogs` records per callback invocation. A single flush cycle may invoke `onFlush()` multiple times, oldest-to-newest, up to the pending sequence target captured when that flush cycle started. Logs appended during that cycle remain pending for a later flush cycle.
+
+If `maxFlushBatchLogs > maxPendingLogs`, it behaves like uncapped for the current pending queue.
+
+`maxFlushBatchLogs` bounds the number of public `TraceLog` objects converted at once. It reduces peak temporary allocation size, but those temporary `std::vector` and `std::string` allocations still use the platform's normal C++ allocator.
+
+`flushAndWait()` waits until all pending logs that existed when `flushAndWait()` was called have been successfully flushed. Logs appended after the call may remain pending for a later flush cycle.
+
 ## Flush results
 
-`TraceFlushResult::Ok` removes flushed pending logs.
+`TraceFlushResult::Ok` removes flushed pending logs. With capped batches, only the successful batch is removed.
 
-`TraceFlushResult::Failed` keeps pending logs, increments failure diagnostics, and makes `flushAndWait()` return `TraceStatus::FlushFailed`.
+`TraceFlushResult::Failed` keeps the current batch and later pending logs, increments failure diagnostics, and makes `flushAndWait()` return `TraceStatus::FlushFailed`.
 
-`TraceFlushResult::Retry` keeps pending logs, increments retry diagnostics, schedules the next attempt with `retryIntervalMs`, and keeps `flushAndWait()` waiting until success, failure, or timeout.
+`TraceFlushResult::Retry` keeps the current batch and later pending logs, increments retry diagnostics, schedules the next attempt with `retryIntervalMs`, and keeps `flushAndWait()` waiting until success, failure, or timeout.
 
 ## Overflow policies
 

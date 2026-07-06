@@ -7,65 +7,125 @@ uint32_t TraceImpl::retryIntervalMsLocked() const {
 	                                                         : config.retryIntervalMs;
 }
 
+uint64_t TraceImpl::latestPendingSequenceLocked() const {
+	if (pendingLogs.empty()) {
+		return 0;
+	}
+	TraceRecord record;
+	if (!pendingLogs.peek(pendingLogs.size() - 1, record)) {
+		return 0;
+	}
+	return record.sequence;
+}
+
+size_t TraceImpl::pendingFlushBatchSizeLocked(uint64_t targetSequence) const {
+	if (targetSequence == 0 || pendingLogs.empty()) {
+		return 0;
+	}
+	const size_t configuredLimit = config.maxFlushBatchLogs;
+	size_t count = 0;
+	for (size_t i = 0; i < pendingLogs.size(); ++i) {
+		TraceRecord record;
+		if (!pendingLogs.peek(i, record) || record.sequence > targetSequence) {
+			break;
+		}
+		count++;
+		if (configuredLimit > 0 && count >= configuredLimit) {
+			break;
+		}
+	}
+	return count;
+}
+
 void TraceImpl::performFlush() {
-	TraceFlushCallback callback;
-	TraceLogBatch batch;
-	uint64_t maxSequence = 0;
 	{
 		TraceLock lock(mutex);
 		if (!lock) {
 			return;
 		}
-		callback = onFlush;
-		batch.createdAtUptimeMs = millis();
-		batch.logs.reserve(pendingLogs.size());
-		for (size_t i = 0; i < pendingLogs.size(); ++i) {
-			TraceRecord record;
-			if (pendingLogs.peek(i, record)) {
-				batch.logs.push_back(toPublicLog(record));
-			}
-		}
-		if (!batch.logs.empty()) {
-			maxSequence = batch.logs.back().sequence;
-		}
+		activeFlushTargetSequence = latestPendingSequenceLocked();
 		flushRequested = false;
 		urgentFlushRequested = false;
-	}
-
-	for (TraceLog &log : batch.logs) {
-		formatLog(log);
-	}
-
-	TraceFlushResult flushResult = TraceFlushResult::Ok;
-	if (callback && !batch.logs.empty()) {
-		flushResult = callback(batch);
-	}
-
-	{
-		TraceLock lock(mutex);
-		if (!lock) {
+		if (activeFlushTargetSequence == 0) {
+			lastFlushAtMs = millis();
+			lastFlushResult = TraceFlushResult::Ok;
+			flushGeneration++;
 			return;
 		}
-		lastFlushAtMs = millis();
-		lastFlushResult = flushResult;
-		flushGeneration++;
-		if (flushResult == TraceFlushResult::Ok) {
-			nextFlushAttemptMs = 0;
-			if (maxSequence > 0) {
+	}
+
+	while (true) {
+		TraceFlushCallback callback;
+		TraceLogBatch batch;
+		uint64_t maxSequence = 0;
+		{
+			TraceLock lock(mutex);
+			if (!lock) {
+				return;
+			}
+			const size_t batchSize = pendingFlushBatchSizeLocked(activeFlushTargetSequence);
+			if (batchSize == 0) {
+				activeFlushTargetSequence = 0;
+				return;
+			}
+			callback = onFlush;
+			batch.createdAtUptimeMs = millis();
+			batch.logs.reserve(batchSize);
+			for (size_t i = 0; i < batchSize; ++i) {
 				TraceRecord record;
-				while (pendingLogs.peek(0, record) && record.sequence <= maxSequence) {
-					pendingLogs.pop(record);
+				if (pendingLogs.peek(i, record)) {
+					batch.logs.push_back(toPublicLog(record));
 				}
 			}
-			flushSuccessCount++;
-		} else if (flushResult == TraceFlushResult::Retry) {
-			flushRetryCount++;
-			nextFlushAttemptMs = lastFlushAtMs + retryIntervalMsLocked();
-		} else {
-			nextFlushAttemptMs = 0;
-			flushFailCount++;
-			if (stopping) {
-				shutdownFlushFailed = true;
+			if (!batch.logs.empty()) {
+				maxSequence = batch.logs.back().sequence;
+			}
+		}
+
+		for (TraceLog &log : batch.logs) {
+			formatLog(log);
+		}
+
+		TraceFlushResult flushResult = TraceFlushResult::Ok;
+		if (callback && !batch.logs.empty()) {
+			flushResult = callback(batch);
+		}
+
+		{
+			TraceLock lock(mutex);
+			if (!lock) {
+				return;
+			}
+			lastFlushAtMs = millis();
+			lastFlushResult = flushResult;
+			flushGeneration++;
+			if (flushResult == TraceFlushResult::Ok) {
+				nextFlushAttemptMs = 0;
+				if (maxSequence > 0) {
+					TraceRecord record;
+					while (pendingLogs.peek(0, record) && record.sequence <= maxSequence) {
+						pendingLogs.pop(record);
+					}
+					lastFlushedSequence = std::max(lastFlushedSequence, maxSequence);
+				}
+				flushSuccessCount++;
+				if (maxSequence >= activeFlushTargetSequence) {
+					activeFlushTargetSequence = 0;
+					return;
+				}
+			} else if (flushResult == TraceFlushResult::Retry) {
+				flushRetryCount++;
+				nextFlushAttemptMs = lastFlushAtMs + retryIntervalMsLocked();
+				activeFlushTargetSequence = 0;
+				return;
+			} else {
+				nextFlushAttemptMs = 0;
+				flushFailCount++;
+				activeFlushTargetSequence = 0;
+				if (stopping) {
+					shutdownFlushFailed = true;
+				}
+				return;
 			}
 		}
 	}
@@ -138,7 +198,8 @@ TraceResult Trace::flush() {
 }
 
 TraceResult Trace::flushAndWait(uint32_t timeoutMs) {
-	uint32_t targetGeneration = 0;
+	uint32_t startGeneration = 0;
+	uint64_t targetSequence = 0;
 	{
 		TraceLock lock(_impl->mutex);
 		if (!lock) {
@@ -147,7 +208,9 @@ TraceResult Trace::flushAndWait(uint32_t timeoutMs) {
 		if (!_impl->initialized || _impl->stopping) {
 			return TraceResult::failure(TraceStatus::NotInitialized, "trace is not initialized");
 		}
-		targetGeneration = _impl->flushGeneration + 1;
+		startGeneration = _impl->flushGeneration;
+		targetSequence = _impl->latestPendingSequenceLocked();
+		_impl->waitingFlushTargetSequence = targetSequence;
 		_impl->flushRequested = true;
 	}
 	_impl->wakeTask();
@@ -155,21 +218,21 @@ TraceResult Trace::flushAndWait(uint32_t timeoutMs) {
 	const uint32_t startedMs = millis();
 	while (true) {
 		TraceFlushResult result = TraceFlushResult::Ok;
+		uint32_t generation = 0;
 		bool done = false;
 		{
 			TraceLock lock(_impl->mutex);
 			if (lock) {
-				done = _impl->flushGeneration >= targetGeneration;
+				generation = _impl->flushGeneration;
+				done = _impl->lastFlushedSequence >= targetSequence;
 				result = _impl->lastFlushResult;
 			}
 		}
 		if (done) {
-			if (result == TraceFlushResult::Ok) {
-				return TraceResult::success("flush completed");
-			}
-			if (result == TraceFlushResult::Failed) {
-				return TraceResult::failure(TraceStatus::FlushFailed, "flush failed");
-			}
+			return TraceResult::success("flush completed");
+		}
+		if (generation > startGeneration && result == TraceFlushResult::Failed) {
+			return TraceResult::failure(TraceStatus::FlushFailed, "flush failed");
 		}
 		if (millis() - startedMs >= timeoutMs) {
 			return TraceResult::failure(TraceStatus::Timeout, "flush timed out");

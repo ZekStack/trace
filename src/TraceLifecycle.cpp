@@ -6,7 +6,7 @@ bool TraceImpl::initBuffers() {
 		deinitBuffers();
 		return false;
 	}
-	if (!realtimeLogs.init(config.maxRealtimeLogs, TraceStorageMemory::Internal, true)) {
+	if (!realtimeLogs.init(config.maxRealtimeLogs, config.realtimeStorageMemory, true)) {
 		deinitBuffers();
 		return false;
 	}
@@ -171,6 +171,10 @@ TraceResult Trace::init(const TraceConfig &config) {
 		_impl->stackHighWaterMarkBytes = 0;
 		_impl->flushGeneration = 0;
 		_impl->lastFlushResult = TraceFlushResult::Ok;
+		_impl->lastAcceptedPendingSequence = 0;
+		_impl->lastFlushedSequence = 0;
+		_impl->activeFlushTargetSequence = 0;
+		_impl->waitingFlushTargetSequence = 0;
 		_impl->nextFlushAttemptMs = 0;
 		_impl->shutdownDeadlineMs = 0;
 		_impl->shutdownTimedOut = false;

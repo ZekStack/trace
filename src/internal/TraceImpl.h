@@ -49,6 +49,10 @@ struct TraceImpl {
 	size_t stackHighWaterMarkBytes = 0;
 	uint32_t flushGeneration = 0;
 	TraceFlushResult lastFlushResult = TraceFlushResult::Ok;
+	uint64_t lastAcceptedPendingSequence = 0;
+	uint64_t lastFlushedSequence = 0;
+	uint64_t activeFlushTargetSequence = 0;
+	uint64_t waitingFlushTargetSequence = 0;
 	uint64_t nextFlushAttemptMs = 0;
 	uint64_t shutdownDeadlineMs = 0;
 	bool shutdownTimedOut = false;
@@ -59,6 +63,8 @@ struct TraceImpl {
 	void wakeTask();
 	void addRecentLocked(const TraceRecord &record);
 	void addRealtimeLocked(const TraceRecord &record);
+	uint64_t latestPendingSequenceLocked() const;
+	size_t pendingFlushBatchSizeLocked(uint64_t targetSequence) const;
 	uint32_t retryIntervalMsLocked() const;
 	TraceResult appendLog(TraceRecord record);
 
