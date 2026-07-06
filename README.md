@@ -155,7 +155,7 @@ For the full API, see [`docs/api.md`](docs/api.md).
 | PSRAM | Optional for task stacks and opt-in recent/pending log storage |
 | Dependencies | `bblanchon/ArduinoJson >= 7.0.0` |
 | Exceptions | Not used |
-| Status | Release candidate `0.2.0-rc.1` |
+| Status | Release `0.2.0` |
 
 ## Configuration
 
