@@ -128,6 +128,8 @@ If `maxFlushBatchLogs > maxPendingLogs`, it behaves like uncapped for the curren
 
 `TraceFlushResult::Retry` keeps the current batch and later pending logs, increments retry diagnostics, schedules the next attempt with `retryIntervalMs`, and keeps `flushAndWait()` waiting until success, failure, or timeout.
 
+`TraceDiag::flushSuccessCount` counts successful `onFlush()` batch callbacks, not high-level flush cycles. When `maxFlushBatchLogs > 0`, one flush cycle may increment it multiple times.
+
 ## Overflow policies
 
 `DropOldestPending` removes the oldest pending log and queues the new log.

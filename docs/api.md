@@ -73,6 +73,8 @@ std::vector<TraceLog> getLogsByTag(const char *tag);
 
 `TraceDiag` includes queue counts, drop and flush counters, task stack information, queue allocation byte counts, and PSRAM placement flags for recent, realtime, and pending queues.
 
+`flushSuccessCount` counts successful `onFlush()` batch callbacks, not high-level flush cycles. When `TraceConfig::maxFlushBatchLogs > 0`, one flush cycle may increment it multiple times.
+
 ## TraceLog
 
 `TraceLog` stores `sequence`, `level`, `tag`, `message`, `formatted`, `timeText`, `uptimeMs`, and `truncated`.
