@@ -10,7 +10,7 @@ Trace helps you collect structured runtime logs in Arduino ESP32 projects with b
 
 ## Why use Trace?
 
-* **Bounded memory** - recent history, realtime delivery, pending flush logs, and payload lengths have separate configured limits.
+* **Bounded memory** - recent history, realtime delivery, pending flush logs, and payload lengths use fixed-capacity storage.
 * **Structured output** - log records keep level, tag, message, formatted text, sequence, and uptime.
 * **Task-side callbacks** - realtime observation and persistence callbacks run from the internal Trace task.
 * **ESP32 task control** - configure byte stack size, priority, core affinity, and stack memory preference.
@@ -80,15 +80,18 @@ void loop() {
 * `maxRecentLogs` controls queryable in-RAM history only.
 * `maxRealtimeLogs` controls the realtime delivery queue used by `onLog()` and stream output.
 * `maxPendingLogs` controls unsaved logs waiting for flush.
-* Queue-count `0` disables that queue. Payload-cap `0` means unlimited.
+* Queue-count `0` disables that queue. Payload-cap `0` uses the compiled maximum for that payload type.
 * `setStream()` writes formatted realtime logs to any Arduino `Print` stream such as `Serial`, `Serial1`, `WiFiClient`, or a custom sink.
 * Stream output uses ANSI colors by default. Callback, flush, and query `TraceLog::formatted` values stay plain text.
+* After `Trace::init()`, accepted direct C-string log calls do not allocate on the internal enqueue path when all target queues have capacity and no output-boundary conversion is triggered.
+* Query APIs, flush batch conversion, `onLog()` conversion, stream implementations, and user-created `std::string` values may still allocate.
 * `onLog()` is for realtime observation; `onFlush()` is for persistence.
 * Callbacks should avoid long blocking work and should not recursively call Trace logging methods.
 * Trace does not own attached `Print` or `Tempo` instances. Keep them alive until `Trace::end()` completes.
 * Detaching or replacing `Print` or `Tempo` while Trace is active does not synchronize already snapshotted worker use.
 * Stack sizes are FreeRTOS byte sizes on ESP32 and must be at least 1024 bytes.
 * `TraceStackType::Auto` prefers PSRAM task stacks when supported and falls back to internal RAM.
+* `TraceStorageMemory::PreferPsram` opts recent and pending log buffers into PSRAM with internal fallback. Realtime delivery stays internal.
 
 ## Examples
 
@@ -149,16 +152,17 @@ For the full API, see [`docs/api.md`](docs/api.md).
 | Platform | `espressif32` |
 | Language | C++20 |
 | Filesystem | none |
-| PSRAM | Optional for task stacks when ESP-IDF support is available |
+| PSRAM | Optional for task stacks and opt-in recent/pending log storage |
 | Dependencies | `bblanchon/ArduinoJson >= 7.0.0` |
 | Exceptions | Not used |
-| Status | Early-stage `0.1.0` |
+| Status | Release `0.2.0` |
 
 ## Configuration
 
 ```cpp
 TraceConfig config;
 config.stackSize = 4096;
+config.storageMemory = TraceStorageMemory::Internal;
 config.maxRecentLogs = 100;
 config.maxRealtimeLogs = 100;
 config.maxPendingLogs = 50;

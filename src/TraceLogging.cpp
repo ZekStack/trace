@@ -1,6 +1,37 @@
 #include "internal/TraceImpl.h"
 
-TraceResult TraceImpl::appendLog(TraceLog log) {
+#include <cstring>
+
+namespace {
+void copyToRecordField(
+    const char *source,
+    size_t sourceLength,
+    size_t configuredLimit,
+    char *target,
+    size_t targetCapacity,
+    bool &truncated
+) {
+	if (target == nullptr || targetCapacity == 0) {
+		return;
+	}
+	target[0] = '\0';
+	if (source == nullptr) {
+		return;
+	}
+	const size_t effective = trace_detail::effectiveLimit(configuredLimit, targetCapacity - 1);
+	const size_t copied = std::min(sourceLength, effective);
+	if (copied > 0) {
+		memcpy(target, source, copied);
+	}
+	target[copied] = '\0';
+	if (sourceLength > effective) {
+		truncated = true;
+	}
+}
+
+} // namespace
+
+TraceResult TraceImpl::appendLog(TraceRecord record) {
 	bool recentAdded = false;
 	const uint64_t startedMs = millis();
 
@@ -20,11 +51,11 @@ TraceResult TraceImpl::appendLog(TraceLog log) {
 			}
 
 			if (!recentAdded) {
-				log.sequence = nextSequence++;
-				addRecentLocked(log);
-				addRealtimeLocked(log);
-				lastLogAtMs = log.uptimeMs;
-				if (log.truncated) {
+				record.sequence = nextSequence++;
+				addRecentLocked(record);
+				addRealtimeLocked(record);
+				lastLogAtMs = record.uptimeMs;
+				if (record.truncated) {
 					truncatedLogCount++;
 				}
 				recentAdded = true;
@@ -33,12 +64,10 @@ TraceResult TraceImpl::appendLog(TraceLog log) {
 			if (config.maxPendingLogs == 0) {
 				droppedLogCount++;
 				shouldNotify = true;
-			} else if (pendingLogs.size() < config.maxPendingLogs) {
-				pendingLogs.push_back(log);
+			} else if (pendingLogs.pushDropNewest(record)) {
 				shouldNotify = true;
 			} else if (config.overflowPolicy == TraceOverflowPolicy::DropOldestPending) {
-				pendingLogs.erase(pendingLogs.begin());
-				pendingLogs.push_back(log);
+				pendingLogs.pushDropOldest(record);
 				droppedLogCount++;
 				shouldNotify = true;
 			} else if (config.overflowPolicy == TraceOverflowPolicy::DropNewest) {
@@ -56,7 +85,7 @@ TraceResult TraceImpl::appendLog(TraceLog log) {
 			if (config.flushEveryLogs > 0 && pendingLogs.size() >= config.flushEveryLogs) {
 				flushRequested = true;
 			}
-			if (config.flushOnError && trace_detail::isErrorLevel(log.level)) {
+			if (config.flushOnError && trace_detail::isErrorLevel(record.level)) {
 				urgentFlushRequested = true;
 				flushRequested = true;
 			}
@@ -82,49 +111,48 @@ TraceResult TraceImpl::appendLog(TraceLog log) {
 	}
 }
 
-void TraceImpl::addRecentLocked(const TraceLog &log) {
+void TraceImpl::addRecentLocked(const TraceRecord &record) {
 	if (config.maxRecentLogs == 0) {
 		return;
 	}
-	while (recentLogs.size() >= config.maxRecentLogs) {
-		recentLogs.erase(recentLogs.begin());
-	}
-	recentLogs.push_back(log);
+	recentLogs.pushDropOldest(record);
 }
 
-void TraceImpl::addRealtimeLocked(const TraceLog &log) {
+void TraceImpl::addRealtimeLocked(const TraceRecord &record) {
 	if (config.maxRealtimeLogs == 0 || (!onLog && stream == nullptr)) {
 		return;
 	}
-	while (realtimeLogs.size() >= config.maxRealtimeLogs) {
-		realtimeLogs.erase(realtimeLogs.begin());
+	if (realtimeLogs.full()) {
 		droppedRealtimeLogCount++;
 	}
-	realtimeLogs.push_back(log);
+	realtimeLogs.pushDropOldest(record);
 	realtimeLogCount++;
 }
 
 void TraceImpl::processRealtimeLogs() {
-	TraceLogCallback callback;
-	Print *streamSnapshot = nullptr;
-	bool colorsEnabled = true;
-	std::vector<TraceLog> logs;
-	{
-		TraceLock lock(mutex);
-		if (!lock) {
-			return;
+	while (true) {
+		TraceLogCallback callback;
+		Print *streamSnapshot = nullptr;
+		bool colorsEnabled = true;
+		TraceRecord record;
+		{
+			TraceLock lock(mutex);
+			if (!lock || stopping || realtimeLogs.empty()) {
+				return;
+			}
+			callback = onLog;
+			streamSnapshot = stream;
+			colorsEnabled = config.enableColors;
+			if (!callback && streamSnapshot == nullptr) {
+				realtimeLogs.clear();
+				return;
+			}
+			if (!realtimeLogs.pop(record)) {
+				return;
+			}
 		}
-		callback = onLog;
-		streamSnapshot = stream;
-		colorsEnabled = config.enableColors;
-		if (!callback && streamSnapshot == nullptr) {
-			realtimeLogs.clear();
-			return;
-		}
-		logs.swap(realtimeLogs);
-	}
 
-	for (TraceLog &log : logs) {
+		TraceLog log = toPublicLog(record);
 		formatLog(log);
 		if (streamSnapshot != nullptr) {
 			const char *color = colorsEnabled ? levelColor(log.level) : "";
@@ -142,26 +170,49 @@ void TraceImpl::processRealtimeLogs() {
 	}
 }
 
+size_t Trace::boundedStrLen(const char *value, size_t maxLen) {
+	if (value == nullptr) {
+		return 0;
+	}
+	size_t length = 0;
+	while (length < maxLen && value[length] != '\0') {
+		length++;
+	}
+	return length;
+}
+
+size_t Trace::getMaxTagLength() const {
+	TraceLock lock(_impl->mutex);
+	if (!lock) {
+		return TRACE_RECORD_MAX_TAG_LENGTH;
+	}
+	return trace_detail::effectiveLimit(_impl->config.maxTagLength, TRACE_RECORD_MAX_TAG_LENGTH);
+}
+
+size_t Trace::getMaxMessageLength() const {
+	TraceLock lock(_impl->mutex);
+	if (!lock) {
+		return TRACE_RECORD_MAX_MESSAGE_LENGTH;
+	}
+	return trace_detail::effectiveLimit(
+	    _impl->config.maxMessageLength,
+	    TRACE_RECORD_MAX_MESSAGE_LENGTH
+	);
+}
+
 size_t Trace::getMaxFormattedLength() const {
 	TraceLock lock(_impl->mutex);
 	if (!lock) {
-		return TraceConfig().maxFormattedLength;
+		return TRACE_FORMATTED_BUFFER_LENGTH;
 	}
-	return _impl->config.maxFormattedLength;
+	return trace_detail::effectiveLimit(
+	    _impl->config.maxFormattedLength,
+	    TRACE_FORMATTED_BUFFER_LENGTH
+	);
 }
 
 TraceResult Trace::log(TraceLevel level, const char *tag, const std::string &message) {
-	TraceConfig config;
-	{
-		TraceLock lock(_impl->mutex);
-		if (lock) {
-			config = _impl->config;
-		}
-	}
-	bool messageTruncated = false;
-	const std::string boundedMessage =
-	    trace_detail::truncateString(message, config.maxMessageLength, messageTruncated);
-	return log(level, tag, boundedMessage, messageTruncated);
+	return log(level, tag, message, false);
 }
 
 TraceResult Trace::log(
@@ -170,10 +221,22 @@ TraceResult Trace::log(
     const std::string &message,
     bool messageTruncated
 ) {
-	if (tag == nullptr || tag[0] == '\0') {
+	const size_t tagLimit = getMaxTagLength();
+	const size_t tagLen = boundedStrLen(tag, tagLimit + 1);
+	return logRaw(level, tag, tagLen, message.data(), message.size(), messageTruncated);
+}
+
+TraceResult Trace::logRaw(
+    TraceLevel level,
+    const char *tag,
+    size_t tagLen,
+    const char *message,
+    size_t messageLen,
+    bool alreadyTruncated
+) {
+	if (tag == nullptr || tagLen == 0) {
 		return TraceResult::failure(TraceStatus::InvalidArgument, "tag is required");
 	}
-
 	TraceConfig config;
 	{
 		TraceLock lock(_impl->mutex);
@@ -190,14 +253,28 @@ TraceResult Trace::log(
 		return TraceResult::success("log filtered");
 	}
 
-	bool tagTruncated = false;
-	TraceLog log;
-	log.level = level;
-	log.tag = trace_detail::copyLimited(tag, config.maxTagLength, tagTruncated);
-	log.message = message;
-	log.uptimeMs = millis();
-	log.truncated = tagTruncated || messageTruncated;
-	return _impl->appendLog(log);
+	bool truncated = alreadyTruncated;
+	TraceRecord record;
+	record.level = level;
+	record.uptimeMs = millis();
+	copyToRecordField(
+	    tag,
+	    tagLen,
+	    config.maxTagLength,
+	    record.tag,
+	    sizeof(record.tag),
+	    truncated
+	);
+	copyToRecordField(
+	    message,
+	    messageLen,
+	    config.maxMessageLength,
+	    record.message,
+	    sizeof(record.message),
+	    truncated
+	);
+	record.truncated = truncated;
+	return _impl->appendLog(record);
 }
 
 TraceResult Trace::logJson(TraceLevel level, const char *tag, const JsonDocument &doc) {
@@ -210,9 +287,23 @@ TraceResult Trace::logJson(TraceLevel level, const char *tag, const JsonDocument
 			maxFormattedLength = _impl->config.maxFormattedLength;
 		}
 	}
-	bool truncated = false;
-	const std::string message = trace_detail::jsonToString(doc, format, maxFormattedLength, truncated);
-	return log(level, tag, message, truncated);
+	const size_t effective = trace_detail::effectiveLimit(
+	    maxFormattedLength,
+	    TRACE_FORMATTED_BUFFER_LENGTH
+	);
+	const size_t measuredLength =
+	    format == TraceJsonFormat::Pretty ? measureJsonPretty(doc) : measureJson(doc);
+	const size_t boundedLength = std::min(measuredLength, effective);
+	const bool truncated = measuredLength > effective;
+	char buffer[TRACE_FORMATTED_BUFFER_LENGTH + 1] = {};
+	const size_t written = format == TraceJsonFormat::Pretty
+	                           ? serializeJsonPretty(doc, buffer, boundedLength + 1)
+	                           : serializeJson(doc, buffer, boundedLength + 1);
+	buffer[boundedLength] = '\0';
+	const size_t messageLen = std::min(written, boundedLength);
+	const size_t tagLimit = getMaxTagLength();
+	const size_t tagLen = boundedStrLen(tag, tagLimit + 1);
+	return logRaw(level, tag, tagLen, buffer, messageLen, truncated);
 }
 
 TraceResult Trace::logVPrintf(
@@ -225,30 +316,58 @@ TraceResult Trace::logVPrintf(
 		return TraceResult::failure(TraceStatus::InvalidArgument, "format is required");
 	}
 	const size_t maxFormattedLength = getMaxFormattedLength();
-	bool truncated = false;
-	const std::string message =
-	    trace_detail::formatPrintf(format, args, maxFormattedLength, truncated);
-	return log(level, tag, message, truncated);
+	char buffer[TRACE_FORMATTED_BUFFER_LENGTH + 1] = {};
+	va_list measureArgs;
+	va_copy(measureArgs, args);
+	const int needed = vsnprintf(nullptr, 0, format, measureArgs);
+	va_end(measureArgs);
+	if (needed < 0) {
+		return TraceResult::failure(TraceStatus::InvalidArgument, "format failed");
+	}
+	const size_t outputLength = static_cast<size_t>(needed);
+	const size_t boundedLength = std::min(outputLength, maxFormattedLength);
+	va_list formatArgs;
+	va_copy(formatArgs, args);
+	vsnprintf(buffer, boundedLength + 1, format, formatArgs);
+	va_end(formatArgs);
+	const size_t tagLimit = getMaxTagLength();
+	const size_t tagLen = boundedStrLen(tag, tagLimit + 1);
+	return logRaw(level, tag, tagLen, buffer, boundedLength, outputLength > maxFormattedLength);
 }
 
 TraceResult Trace::debug(const char *tag, const char *message) {
-	return log(TraceLevel::Debug, tag, message != nullptr ? message : "");
+	const size_t tagLen = boundedStrLen(tag, getMaxTagLength() + 1);
+	const char *safeMessage = message != nullptr ? message : "";
+	const size_t messageLen = boundedStrLen(safeMessage, getMaxMessageLength() + 1);
+	return logRaw(TraceLevel::Debug, tag, tagLen, safeMessage, messageLen, false);
 }
 
 TraceResult Trace::info(const char *tag, const char *message) {
-	return log(TraceLevel::Info, tag, message != nullptr ? message : "");
+	const size_t tagLen = boundedStrLen(tag, getMaxTagLength() + 1);
+	const char *safeMessage = message != nullptr ? message : "";
+	const size_t messageLen = boundedStrLen(safeMessage, getMaxMessageLength() + 1);
+	return logRaw(TraceLevel::Info, tag, tagLen, safeMessage, messageLen, false);
 }
 
 TraceResult Trace::warn(const char *tag, const char *message) {
-	return log(TraceLevel::Warn, tag, message != nullptr ? message : "");
+	const size_t tagLen = boundedStrLen(tag, getMaxTagLength() + 1);
+	const char *safeMessage = message != nullptr ? message : "";
+	const size_t messageLen = boundedStrLen(safeMessage, getMaxMessageLength() + 1);
+	return logRaw(TraceLevel::Warn, tag, tagLen, safeMessage, messageLen, false);
 }
 
 TraceResult Trace::error(const char *tag, const char *message) {
-	return log(TraceLevel::Error, tag, message != nullptr ? message : "");
+	const size_t tagLen = boundedStrLen(tag, getMaxTagLength() + 1);
+	const char *safeMessage = message != nullptr ? message : "";
+	const size_t messageLen = boundedStrLen(safeMessage, getMaxMessageLength() + 1);
+	return logRaw(TraceLevel::Error, tag, tagLen, safeMessage, messageLen, false);
 }
 
 TraceResult Trace::fatal(const char *tag, const char *message) {
-	return log(TraceLevel::Fatal, tag, message != nullptr ? message : "");
+	const size_t tagLen = boundedStrLen(tag, getMaxTagLength() + 1);
+	const char *safeMessage = message != nullptr ? message : "";
+	const size_t messageLen = boundedStrLen(safeMessage, getMaxMessageLength() + 1);
+	return logRaw(TraceLevel::Fatal, tag, tagLen, safeMessage, messageLen, false);
 }
 
 TraceResult Trace::debug(const char *tag, const std::string &message) {

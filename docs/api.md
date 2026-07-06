@@ -12,7 +12,7 @@
 
 `TraceFlushResult` values are `Ok`, `Failed`, and `Retry`.
 
-`Ok` removes flushed pending logs. `Failed` is terminal for the current `flushAndWait()` call but retains pending logs. `Retry` retains pending logs, schedules another attempt using `TraceConfig::retryIntervalMs`, and keeps `flushAndWait()` waiting until `Ok`, `Failed`, or timeout.
+`Ok` removes flushed pending logs. `Failed` is terminal for the current `flushAndWait()` call but retains pending logs. `Retry` retains pending logs, schedules another attempt using `TraceConfig::retryIntervalMs`, and keeps `flushAndWait()` waiting until `Ok`, `Failed`, or timeout. Normal flush requests do not bypass the retry deadline; urgent error and fatal flush requests may bypass it.
 
 ## Main methods
 
@@ -66,6 +66,8 @@ std::vector<TraceLog> getLogs(TraceLevel level);
 std::vector<TraceLog> getLastLogs(size_t count);
 std::vector<TraceLog> getLogsByTag(const char *tag);
 ```
+
+`TraceDiag` includes queue counts, drop and flush counters, task stack information, queue allocation byte counts, and PSRAM placement flags for recent, realtime, and pending queues.
 
 ## TraceLog
 

@@ -1,5 +1,28 @@
 #include "internal/TraceImpl.h"
 
+bool TraceImpl::initBuffers() {
+	deinitBuffers();
+	if (!recentLogs.init(config.maxRecentLogs, config.storageMemory, false)) {
+		deinitBuffers();
+		return false;
+	}
+	if (!realtimeLogs.init(config.maxRealtimeLogs, TraceStorageMemory::Internal, true)) {
+		deinitBuffers();
+		return false;
+	}
+	if (!pendingLogs.init(config.maxPendingLogs, config.storageMemory, false)) {
+		deinitBuffers();
+		return false;
+	}
+	return true;
+}
+
+void TraceImpl::deinitBuffers() {
+	recentLogs.deinit();
+	realtimeLogs.deinit();
+	pendingLogs.deinit();
+}
+
 void TraceImpl::wakeTask() {
 	TaskHandle_t handle = nullptr;
 	{
@@ -135,9 +158,6 @@ TraceResult Trace::init(const TraceConfig &config) {
 		_impl->stopping = false;
 		_impl->flushRequested = false;
 		_impl->urgentFlushRequested = false;
-		_impl->recentLogs.clear();
-		_impl->realtimeLogs.clear();
-		_impl->pendingLogs.clear();
 		_impl->nextSequence = 1;
 		_impl->droppedLogCount = 0;
 		_impl->realtimeLogCount = 0;
@@ -155,6 +175,12 @@ TraceResult Trace::init(const TraceConfig &config) {
 		_impl->shutdownDeadlineMs = 0;
 		_impl->shutdownTimedOut = false;
 		_impl->shutdownFlushFailed = false;
+		if (!_impl->initBuffers()) {
+			return TraceResult::failure(
+			    TraceStatus::OutOfMemory,
+			    "failed to allocate trace buffers"
+			);
+		}
 	}
 
 	TaskHandle_t handle = nullptr;
@@ -171,6 +197,10 @@ TraceResult Trace::init(const TraceConfig &config) {
 	    createdWithCaps
 	);
 	if (created != pdPASS || handle == nullptr) {
+		TraceLock lock(_impl->mutex);
+		if (lock) {
+			_impl->deinitBuffers();
+		}
 		return TraceResult::failure(TraceStatus::TaskCreateFailed, "failed to create trace task");
 	}
 
@@ -217,6 +247,7 @@ TraceResult Trace::end(uint32_t timeoutMs) {
 				_impl->initialized = false;
 				_impl->stopping = false;
 				_impl->shutdownDeadlineMs = 0;
+				_impl->deinitBuffers();
 				if (timedOut) {
 					return TraceResult::failure(TraceStatus::Timeout, "trace end timed out");
 				}

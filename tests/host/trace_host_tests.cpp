@@ -1,16 +1,70 @@
 #include <Trace.h>
+#include "esp_heap_caps.h"
 
 #include <atomic>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <new>
 #include <string>
 #include <thread>
 #include <vector>
 
 std::atomic<uint64_t> trace_host_millis{0};
+std::atomic<size_t> trace_host_global_allocations{0};
+
+void *operator new(std::size_t size) {
+	if (size == 0) {
+		size = 1;
+	}
+	void *ptr = std::malloc(size);
+	if (ptr == nullptr) {
+		throw std::bad_alloc();
+	}
+	trace_host_global_allocations.fetch_add(1, std::memory_order_relaxed);
+	return ptr;
+}
+
+void *operator new[](std::size_t size) {
+	if (size == 0) {
+		size = 1;
+	}
+	void *ptr = std::malloc(size);
+	if (ptr == nullptr) {
+		throw std::bad_alloc();
+	}
+	trace_host_global_allocations.fetch_add(1, std::memory_order_relaxed);
+	return ptr;
+}
+
+void operator delete(void *ptr) noexcept {
+	std::free(ptr);
+}
+
+void operator delete[](void *ptr) noexcept {
+	std::free(ptr);
+}
+
+void operator delete(void *ptr, std::size_t) noexcept {
+	std::free(ptr);
+}
+
+void operator delete[](void *ptr, std::size_t) noexcept {
+	std::free(ptr);
+}
 
 namespace {
+struct AllocationScope {
+	size_t start;
+
+	AllocationScope() : start(trace_host_global_allocations.load(std::memory_order_relaxed)) {
+	}
+
+	size_t delta() const {
+		return trace_host_global_allocations.load(std::memory_order_relaxed) - start;
+	}
+};
+
 struct FakePrint : Print {
 	std::string output;
 
@@ -270,6 +324,76 @@ void flushResults(TestRunner &runner) {
 	}
 }
 
+void retryBackoffRequests(TestRunner &runner) {
+	resetClock();
+	{
+		Trace trace;
+		int attempts = 0;
+		std::vector<uint64_t> attemptTimes;
+		trace.onFlush([&attempts, &attemptTimes](const TraceLogBatch &) {
+			attempts++;
+			attemptTimes.push_back(trace_host_millis.load());
+			return TraceFlushResult::Retry;
+		});
+		TraceConfig config = baseConfig();
+		config.maxPendingLogs = 1;
+		config.overflowPolicy = TraceOverflowPolicy::BlockCaller;
+		config.retryIntervalMs = 1000;
+		config.blockCallerTimeoutMs = 20;
+		runner.check(trace.init(config), "init normal retry gating");
+		runner.check(trace.info("R", "one"), "first normal retry gating log");
+		TraceResult flushResult = trace.flushAndWait(20);
+		runner.check(
+		    !flushResult && flushResult.status == TraceStatus::Timeout,
+		    "initial retry waits for retry interval"
+		);
+		TraceResult blocked = trace.info("R", "two");
+		runner.check(
+		    !blocked && blocked.status == TraceStatus::Timeout,
+		    "normal full-queue request waits for space"
+		);
+		bool retrySpacingOk = true;
+		for (size_t i = 1; i < attemptTimes.size(); ++i) {
+			if (attemptTimes[i] < attemptTimes[i - 1] + config.retryIntervalMs) {
+				retrySpacingOk = false;
+			}
+		}
+		runner.check(
+		    retrySpacingOk,
+		    "normal full-queue request does not bypass retry interval"
+		);
+		trace.end(20);
+	}
+	resetClock();
+	{
+		Trace trace;
+		int attempts = 0;
+		trace.onFlush([&attempts](const TraceLogBatch &) {
+			attempts++;
+			return attempts == 1 ? TraceFlushResult::Retry : TraceFlushResult::Ok;
+		});
+		TraceConfig config = baseConfig();
+		config.maxPendingLogs = 2;
+		config.retryIntervalMs = 1000;
+		runner.check(trace.init(config), "init urgent retry bypass");
+		runner.check(trace.info("R", "one"), "first urgent retry bypass log");
+		TraceResult flushResult = trace.flushAndWait(20);
+		runner.check(
+		    !flushResult && flushResult.status == TraceStatus::Timeout,
+		    "urgent retry bypass setup times out"
+		);
+		const int attemptsBeforeUrgent = attempts;
+		runner.check(trace.error("R", "urgent"), "urgent log accepted");
+		runner.check(
+		    waitUntil([&attempts, attemptsBeforeUrgent]() {
+			    return attempts > attemptsBeforeUrgent;
+		    }, 100),
+		    "urgent request triggers another flush attempt"
+		);
+		runner.check(trace.end(), "end urgent retry bypass");
+	}
+}
+
 void callbacksRunOutsideLock(TestRunner &runner) {
 	resetClock();
 	Trace trace;
@@ -290,6 +414,28 @@ void callbacksRunOutsideLock(TestRunner &runner) {
 	runner.check(waitUntil([&logCallbackOk]() { return logCallbackOk; }), "onLog can call getDiagnostics");
 	runner.check(flushCallbackOk, "onFlush can call getDiagnostics");
 	runner.check(trace.end(), "end callbacksRunOutsideLock");
+}
+
+void realtimeDetachStopsFutureRecords(TestRunner &runner) {
+	resetClock();
+	Trace trace;
+	int observed = 0;
+	trace.onLog([&trace, &observed](const TraceLog &) {
+		observed++;
+		trace.onLog(nullptr);
+	});
+	TraceConfig config = baseConfig();
+	config.maxRealtimeLogs = 4;
+	runner.check(trace.init(config), "init realtimeDetachStopsFutureRecords");
+	runner.check(trace.info("RT", "one"), "first realtime detach log");
+	runner.check(trace.info("RT", "two"), "second realtime detach log");
+	runner.check(
+	    waitUntil([&observed]() { return observed == 1; }),
+	    "detached realtime callback receives first record"
+	);
+	vTaskDelay(10);
+	runner.check(observed == 1, "detached realtime callback does not receive later records");
+	runner.check(trace.end(), "end realtimeDetachStopsFutureRecords");
 }
 
 void truncation(TestRunner &runner) {
@@ -350,6 +496,239 @@ void shutdownResults(TestRunner &runner) {
 	}
 }
 
+void storageAllocationPolicies(TestRunner &runner) {
+	resetClock();
+	trace_host_heap::reset();
+	trace_host_heap::psramAvailable = true;
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		runner.check(trace.init(config), "init default internal storage");
+		TraceDiag diag = trace.getDiagnostics();
+		runner.check(!diag.recentLogsInPsram, "default recent storage is internal");
+		runner.check(!diag.realtimeLogsInPsram, "realtime storage is internal");
+		runner.check(!diag.pendingLogsInPsram, "default pending storage is internal");
+		runner.check(diag.recentAllocatedBytes > 0, "recent allocated bytes reported");
+		runner.check(diag.realtimeAllocatedBytes > 0, "realtime allocated bytes reported");
+		runner.check(diag.pendingAllocatedBytes > 0, "pending allocated bytes reported");
+		runner.check(trace.end(), "end default internal storage");
+	}
+
+	resetClock();
+	trace_host_heap::reset();
+	trace_host_heap::psramAvailable = true;
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.storageMemory = TraceStorageMemory::PreferPsram;
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		runner.check(trace.init(config), "init PreferPsram storage");
+		TraceDiag diag = trace.getDiagnostics();
+		runner.check(diag.recentLogsInPsram, "PreferPsram recent uses PSRAM");
+		runner.check(!diag.realtimeLogsInPsram, "PreferPsram realtime remains internal");
+		runner.check(diag.pendingLogsInPsram, "PreferPsram pending uses PSRAM");
+		runner.check(trace.end(), "end PreferPsram storage");
+	}
+
+	resetClock();
+	trace_host_heap::reset();
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.storageMemory = TraceStorageMemory::PreferPsram;
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		runner.check(trace.init(config), "init PreferPsram fallback storage");
+		TraceDiag diag = trace.getDiagnostics();
+		runner.check(!diag.recentLogsInPsram, "PreferPsram recent falls back to internal");
+		runner.check(!diag.pendingLogsInPsram, "PreferPsram pending falls back to internal");
+		runner.check(trace.end(), "end PreferPsram fallback storage");
+	}
+
+	resetClock();
+	trace_host_heap::reset();
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.storageMemory = TraceStorageMemory::RequirePsram;
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		TraceResult result = trace.init(config);
+		runner.check(
+		    !result && result.status == TraceStatus::OutOfMemory,
+		    "RequirePsram fails without PSRAM"
+		);
+		runner.check(
+		    trace_host_heap::activeAllocations == 0,
+		    "RequirePsram failure leaves no allocations"
+		);
+	}
+}
+
+void partialAllocationCleanup(TestRunner &runner) {
+	resetClock();
+	trace_host_heap::reset();
+	trace_host_heap::allocationsBeforeFailure = 2;
+	Trace trace;
+	TraceConfig config = baseConfig();
+	config.maxRecentLogs = 2;
+	config.maxRealtimeLogs = 2;
+	config.maxPendingLogs = 2;
+	TraceResult result = trace.init(config);
+	runner.check(
+	    !result && result.status == TraceStatus::OutOfMemory,
+	    "partial allocation init fails"
+	);
+	runner.check(
+	    trace_host_heap::activeAllocations == 0,
+	    "partial allocation failure frees previous buffers"
+	);
+}
+
+void enqueueDoesNotAllocateAfterInit(TestRunner &runner) {
+	resetClock();
+	trace_host_heap::reset();
+	Trace trace;
+	TraceConfig config = baseConfig();
+	config.maxRecentLogs = 4;
+	config.maxRealtimeLogs = 4;
+	config.maxPendingLogs = 4;
+	runner.check(trace.init(config), "init enqueueDoesNotAllocateAfterInit");
+	const size_t allocationsAfterInit = trace_host_heap::allocationCount;
+	runner.check(trace.info("HOT", "ok"), "log enqueueDoesNotAllocateAfterInit");
+	runner.check(
+	    trace_host_heap::allocationCount == allocationsAfterInit,
+	    "accepted internal enqueue does not heap-cap allocate"
+	);
+	runner.check(trace.end(), "end enqueueDoesNotAllocateAfterInit");
+}
+
+void directCStringDoesNotAllocateAfterInit(TestRunner &runner) {
+	resetClock();
+	trace_host_heap::reset();
+	Trace trace;
+	TraceConfig config = baseConfig();
+	config.maxRecentLogs = 4;
+	config.maxRealtimeLogs = 4;
+	config.maxPendingLogs = 4;
+	runner.check(trace.init(config), "init directCStringDoesNotAllocateAfterInit short");
+	TraceResult shortResult;
+	size_t shortAllocations = 0;
+	{
+		AllocationScope scope;
+		shortResult = trace.info("HOT", "message");
+		shortAllocations = scope.delta();
+	}
+	runner.check(shortResult, "short direct C-string log accepted");
+	runner.check(shortAllocations == 0, "short direct C-string log does not allocate");
+	runner.check(trace.end(), "end directCStringDoesNotAllocateAfterInit short");
+
+	resetClock();
+	trace_host_heap::reset();
+	Trace longTrace;
+	TraceConfig longConfig = baseConfig();
+	longConfig.maxRecentLogs = 4;
+	longConfig.maxRealtimeLogs = 4;
+	longConfig.maxPendingLogs = 4;
+	longConfig.maxMessageLength = 5;
+	runner.check(longTrace.init(longConfig), "init directCStringDoesNotAllocateAfterInit long");
+	TraceResult longResult;
+	size_t longAllocations = 0;
+	{
+		AllocationScope scope;
+		longResult = longTrace.info("HOT", "message longer than the configured message cap");
+		longAllocations = scope.delta();
+	}
+	runner.check(longResult, "long direct C-string log accepted");
+	runner.check(longAllocations == 0, "long direct C-string log does not allocate");
+	TraceLog log = longTrace.getLastLog();
+	runner.check(log.message == "messa", "long direct C-string log is truncated");
+	runner.check(log.truncated, "long direct C-string log marks truncation");
+	runner.check(
+	    longTrace.getDiagnostics().truncatedLogCount == 1,
+	    "long direct C-string truncation counted once"
+	);
+	runner.check(longTrace.end(), "end directCStringDoesNotAllocateAfterInit long");
+}
+
+void ringOrderAndSequenceConsistency(TestRunner &runner) {
+	resetClock();
+	trace_host_heap::reset();
+	Trace trace;
+	std::vector<uint64_t> realtimeSequences;
+	std::vector<uint64_t> flushedSequences;
+	trace.onLog([&realtimeSequences](const TraceLog &log) {
+		realtimeSequences.push_back(log.sequence);
+	});
+	trace.onFlush([&flushedSequences](const TraceLogBatch &batch) {
+		for (const TraceLog &log : batch.logs) {
+			flushedSequences.push_back(log.sequence);
+		}
+		return TraceFlushResult::Ok;
+	});
+
+	TraceConfig config = baseConfig();
+	config.maxRecentLogs = 3;
+	config.maxRealtimeLogs = 5;
+	config.maxPendingLogs = 3;
+	config.overflowPolicy = TraceOverflowPolicy::DropOldestPending;
+	runner.check(trace.init(config), "init ringOrderAndSequenceConsistency");
+	for (int i = 1; i <= 5; ++i) {
+		runner.check(trace.infof("SEQ", "item=%d", i), "sequence log");
+	}
+	runner.check(
+	    waitUntil([&realtimeSequences]() { return realtimeSequences.size() == 5; }),
+	    "realtime sees five logs"
+	);
+	std::vector<TraceLog> recent = trace.getLogs();
+	runner.check(
+	    recent.size() == 3 && recent[0].sequence == 3 && recent[1].sequence == 4 &&
+	        recent[2].sequence == 5,
+	    "recent query returns wrapped records oldest-to-newest"
+	);
+	runner.check(
+	    realtimeSequences.size() == 5 && realtimeSequences[0] == 1 && realtimeSequences[1] == 2 &&
+	        realtimeSequences[2] == 3 && realtimeSequences[3] == 4 && realtimeSequences[4] == 5,
+	    "realtime callback order is oldest-to-newest"
+	);
+	runner.check(trace.flushAndWait(1000), "flush ringOrderAndSequenceConsistency");
+	runner.check(
+	    flushedSequences.size() == 3 && flushedSequences[0] == 3 && flushedSequences[1] == 4 &&
+	        flushedSequences[2] == 5,
+	    "flush batch returns wrapped pending records oldest-to-newest"
+	);
+	runner.check(trace.end(), "end ringOrderAndSequenceConsistency");
+}
+
+void runtimeCapClamping(TestRunner &runner) {
+	resetClock();
+	trace_host_heap::reset();
+	Trace trace;
+	TraceConfig config = baseConfig();
+	config.maxTagLength = TRACE_RECORD_MAX_TAG_LENGTH + 100;
+	config.maxMessageLength = 0;
+	config.maxFormattedLength = 0;
+	runner.check(trace.init(config), "init runtimeCapClamping");
+	std::string longTag(TRACE_RECORD_MAX_TAG_LENGTH + 10, 'T');
+	std::string longMessage(TRACE_RECORD_MAX_MESSAGE_LENGTH + 10, 'M');
+	runner.check(trace.info(longTag.c_str(), longMessage), "log runtimeCapClamping");
+	TraceLog log = trace.getLastLog();
+	runner.check(log.tag.size() == TRACE_RECORD_MAX_TAG_LENGTH, "tag cap clamps to compile maximum");
+	runner.check(
+	    log.message.size() == TRACE_RECORD_MAX_MESSAGE_LENGTH,
+	    "message zero runtime cap uses compile maximum"
+	);
+	runner.check(log.truncated, "runtime cap clamping marks truncation");
+	runner.check(trace.end(), "end runtimeCapClamping");
+}
+
 } // namespace
 
 int main() {
@@ -361,9 +740,17 @@ int main() {
 	pendingOverflowPolicies(runner);
 	blockingAndFlushImmediately(runner);
 	flushResults(runner);
+	retryBackoffRequests(runner);
 	callbacksRunOutsideLock(runner);
+	realtimeDetachStopsFutureRecords(runner);
 	truncation(runner);
 	shutdownResults(runner);
+	storageAllocationPolicies(runner);
+	partialAllocationCleanup(runner);
+	enqueueDoesNotAllocateAfterInit(runner);
+	directCStringDoesNotAllocateAfterInit(runner);
+	ringOrderAndSequenceConsistency(runner);
+	runtimeCapClamping(runner);
 
 	if (runner.failed != 0) {
 		std::cerr << runner.failed << " host Trace tests failed\n";
