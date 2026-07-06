@@ -49,6 +49,8 @@ void loop() {
 `setStream()` accepts any Arduino `Print` implementation. Use `trace.setStream(&Serial1)`,
 `trace.setStream(&client)`, or `trace.setStream(nullptr)` to change or disable stream output.
 
+Trace does not own the stream. Keep it alive until `Trace::end()` completes.
+
 ## Persistence
 
 Use `onFlush()` to persist pending logs to Fresh, LittleFS, a backend, or another store.
@@ -62,4 +64,4 @@ trace.onFlush([](const TraceLogBatch &batch) {
 });
 ```
 
-`flush()` requests a flush and returns immediately. `flushAndWait()` waits until the task-side flush finishes or the timeout expires.
+`flush()` requests a flush and returns immediately. `flushAndWait()` waits until the task-side flush succeeds, fails, or the timeout expires. A retry result schedules another attempt and keeps `flushAndWait()` waiting within its timeout.

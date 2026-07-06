@@ -9,22 +9,43 @@ config.priority = 1;
 config.coreId = tskNO_AFFINITY;
 config.stackType = TraceStackType::Auto;
 config.maxRecentLogs = 100;
+config.maxRealtimeLogs = 100;
 config.maxPendingLogs = 50;
 config.flushEveryLogs = 20;
 config.flushIntervalMs = 30000;
+config.retryIntervalMs = 1000;
 config.flushOnError = true;
 config.overflowPolicy = TraceOverflowPolicy::DropOldestPending;
 config.jsonFormat = TraceJsonFormat::Compact;
 config.minLevel = TraceLevel::Debug;
 config.enableColors = true;
 config.blockCallerTimeoutMs = 1000;
+config.maxTagLength = 32;
+config.maxMessageLength = 256;
+config.maxFormattedLength = 384;
 ```
 
 ## Buffers
 
-`maxRecentLogs` controls queryable in-RAM history. Recent logs stay available until overwritten by newer logs.
+`maxRecentLogs` controls queryable in-RAM history only. Recent logs stay available until overwritten by newer logs. `maxRecentLogs = 0` disables query history.
+
+`maxRealtimeLogs` controls the delivery queue used by `onLog()` and stream output. It is independent from recent history. `maxRealtimeLogs = 0` disables realtime buffering and delivery.
 
 `maxPendingLogs` controls unsaved logs waiting for `onFlush()`. Pending logs are cleared only after the flush callback returns `TraceFlushResult::Ok`.
+
+`maxPendingLogs = 0` disables persistence buffering. Logs are still accepted for recent history and realtime delivery, but they are counted as dropped for persistence.
+
+Queue-count `0` means disabled. Payload-cap `0` means unlimited.
+
+## Payload limits
+
+`maxTagLength` applies to `TraceLog::tag`.
+
+`maxMessageLength` applies to direct message logging APIs.
+
+`maxFormattedLength` applies to `printf`-style and JSON-formatted input before it becomes `TraceLog::message`.
+
+When Trace truncates a log, `TraceLog::truncated` is set. `TraceDiag::truncatedLogCount` increments once per log record, even if both tag and message were truncated.
 
 ## Flush triggers
 
@@ -34,6 +55,16 @@ Trace flushes pending logs when:
 * `pendingLogCount >= flushEveryLogs`.
 * `flushIntervalMs` elapses with pending logs.
 * `flushOnError` is enabled and an `Error` or `Fatal` log is queued.
+
+`retryIntervalMs` controls the delay after `TraceFlushResult::Retry`. Values smaller than the worker poll interval are clamped so retry cannot spin in a tight loop.
+
+## Flush results
+
+`TraceFlushResult::Ok` removes flushed pending logs.
+
+`TraceFlushResult::Failed` keeps pending logs, increments failure diagnostics, and makes `flushAndWait()` return `TraceStatus::FlushFailed`.
+
+`TraceFlushResult::Retry` keeps pending logs, increments retry diagnostics, schedules the next attempt with `retryIntervalMs`, and keeps `flushAndWait()` waiting until success, failure, or timeout.
 
 ## Overflow policies
 

@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <stdarg.h>
@@ -89,15 +90,20 @@ struct TraceConfig {
 	BaseType_t coreId = tskNO_AFFINITY;
 	TraceStackType stackType = TraceStackType::Auto;
 	size_t maxRecentLogs = 100;
+	size_t maxRealtimeLogs = 100;
 	size_t maxPendingLogs = 50;
 	size_t flushEveryLogs = 20;
 	uint32_t flushIntervalMs = 30000;
+	uint32_t retryIntervalMs = 1000;
 	bool flushOnError = true;
 	TraceOverflowPolicy overflowPolicy = TraceOverflowPolicy::DropOldestPending;
 	TraceJsonFormat jsonFormat = TraceJsonFormat::Compact;
 	TraceLevel minLevel = TraceLevel::Debug;
 	bool enableColors = true;
 	uint32_t blockCallerTimeoutMs = 1000;
+	size_t maxTagLength = 32;
+	size_t maxMessageLength = 256;
+	size_t maxFormattedLength = 384;
 	const char *taskName = "trace-task";
 };
 
@@ -109,6 +115,7 @@ struct TraceLog {
 	std::string formatted;
 	std::string timeText;
 	uint64_t uptimeMs = 0;
+	bool truncated = false;
 };
 
 struct TraceLogBatch {
@@ -126,10 +133,14 @@ struct TraceLogBatch {
 
 struct TraceDiag {
 	size_t recentLogCount = 0;
+	size_t realtimeLogCount = 0;
 	size_t pendingLogCount = 0;
 	uint32_t droppedLogCount = 0;
+	uint32_t droppedRealtimeLogCount = 0;
+	uint32_t truncatedLogCount = 0;
 	uint32_t flushSuccessCount = 0;
 	uint32_t flushFailCount = 0;
+	uint32_t flushRetryCount = 0;
 	uint64_t lastFlushAtMs = 0;
 	uint64_t lastLogAtMs = 0;
 	size_t stackHighWaterMarkBytes = 0;
@@ -248,10 +259,21 @@ class Trace {
 		if (needed < 0) {
 			return TraceResult::failure(TraceStatus::InvalidArgument, "format failed");
 		}
-		std::vector<char> buffer(static_cast<size_t>(needed) + 1);
+		const size_t limit = getMaxFormattedLength();
+		const bool unlimited = limit == 0;
+		const size_t outputLength = static_cast<size_t>(needed);
+		const size_t boundedLength = unlimited ? outputLength : std::min(outputLength, limit);
+		std::vector<char> buffer(boundedLength + 1);
 		snprintf(buffer.data(), buffer.size(), format, args...);
-		return log(level, tag, std::string(buffer.data()));
+		return log(level, tag, std::string(buffer.data()), !unlimited && outputLength > limit);
 	}
 
+	size_t getMaxFormattedLength() const;
+	TraceResult log(
+	    TraceLevel level,
+	    const char *tag,
+	    const std::string &message,
+	    bool messageTruncated
+	);
 	std::unique_ptr<TraceImpl> _impl;
 };

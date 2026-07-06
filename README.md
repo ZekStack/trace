@@ -2,7 +2,7 @@
 
 Trace is a logging and diagnostics library for ESP32.
 
-Trace helps you collect structured runtime logs in Arduino ESP32 projects with bounded RAM history, bounded pending flush storage, task-side persistence callbacks, optional Tempo timestamps, and diagnostics. It is designed for products that need predictable logging behavior without relying on ESP-IDF or Arduino logging macros.
+Trace helps you collect structured runtime logs in Arduino ESP32 projects with bounded RAM history, bounded realtime delivery, bounded pending flush storage, task-side persistence callbacks, optional Tempo timestamps, and diagnostics. It is designed for products that need predictable logging behavior without relying on ESP-IDF or Arduino logging macros.
 
 [![CI](https://github.com/ZekStack/trace/actions/workflows/ci.yml/badge.svg)](https://github.com/ZekStack/trace/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ZekStack/trace?sort=semver)](https://github.com/ZekStack/trace/releases)
@@ -10,7 +10,7 @@ Trace helps you collect structured runtime logs in Arduino ESP32 projects with b
 
 ## Why use Trace?
 
-* **Bounded memory** - recent and pending logs have separate configured limits.
+* **Bounded memory** - recent history, realtime delivery, pending flush logs, and payload lengths have separate configured limits.
 * **Structured output** - log records keep level, tag, message, formatted text, sequence, and uptime.
 * **Task-side callbacks** - realtime observation and persistence callbacks run from the internal Trace task.
 * **ESP32 task control** - configure byte stack size, priority, core affinity, and stack memory preference.
@@ -77,12 +77,16 @@ void loop() {
 > [!IMPORTANT]
 > `info()`, `debug()`, `warn()`, `error()`, and `fatal()` only enqueue logs. `onLog()` and `onFlush()` callbacks run later from the internal Trace task.
 
-* `maxRecentLogs` controls queryable in-RAM history.
+* `maxRecentLogs` controls queryable in-RAM history only.
+* `maxRealtimeLogs` controls the realtime delivery queue used by `onLog()` and stream output.
 * `maxPendingLogs` controls unsaved logs waiting for flush.
+* Queue-count `0` disables that queue. Payload-cap `0` means unlimited.
 * `setStream()` writes formatted realtime logs to any Arduino `Print` stream such as `Serial`, `Serial1`, `WiFiClient`, or a custom sink.
 * Stream output uses ANSI colors by default. Callback, flush, and query `TraceLog::formatted` values stay plain text.
 * `onLog()` is for realtime observation; `onFlush()` is for persistence.
 * Callbacks should avoid long blocking work and should not recursively call Trace logging methods.
+* Trace does not own attached `Print` or `Tempo` instances. Keep them alive until `Trace::end()` completes.
+* Detaching or replacing `Print` or `Tempo` while Trace is active does not synchronize already snapshotted worker use.
 * Stack sizes are FreeRTOS byte sizes on ESP32 and must be at least 1024 bytes.
 * `TraceStackType::Auto` prefers PSRAM task stacks when supported and falls back to internal RAM.
 
@@ -148,7 +152,7 @@ For the full API, see [`docs/api.md`](docs/api.md).
 | PSRAM | Optional for task stacks when ESP-IDF support is available |
 | Dependencies | `bblanchon/ArduinoJson >= 7.0.0` |
 | Exceptions | Not used |
-| Status | Early-stage `0.0.1` |
+| Status | Early-stage `0.1.0` |
 
 ## Configuration
 
@@ -156,11 +160,16 @@ For the full API, see [`docs/api.md`](docs/api.md).
 TraceConfig config;
 config.stackSize = 4096;
 config.maxRecentLogs = 100;
+config.maxRealtimeLogs = 100;
 config.maxPendingLogs = 50;
 config.flushEveryLogs = 20;
 config.flushIntervalMs = 30000;
+config.retryIntervalMs = 1000;
 config.overflowPolicy = TraceOverflowPolicy::DropOldestPending;
 config.enableColors = true;
+config.maxTagLength = 32;
+config.maxMessageLength = 256;
+config.maxFormattedLength = 384;
 
 TraceResult result = trace.init(config);
 ```

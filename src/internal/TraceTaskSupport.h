@@ -112,6 +112,7 @@ inline BaseType_t createTask(
 }
 
 inline void deleteCurrentTask(bool withCaps) {
+	(void)withCaps;
 #if TRACE_CAN_USE_EXTERNAL_STACKS
 	if (withCaps) {
 		vTaskDeleteWithCaps(xTaskGetCurrentTaskHandle());

@@ -12,6 +12,8 @@
 
 `TraceFlushResult` values are `Ok`, `Failed`, and `Retry`.
 
+`Ok` removes flushed pending logs. `Failed` is terminal for the current `flushAndWait()` call but retains pending logs. `Retry` retains pending logs, schedules another attempt using `TraceConfig::retryIntervalMs`, and keeps `flushAndWait()` waiting until `Ok`, `Failed`, or timeout.
+
 ## Main methods
 
 ```cpp
@@ -67,7 +69,7 @@ std::vector<TraceLog> getLogsByTag(const char *tag);
 
 ## TraceLog
 
-`TraceLog` stores `sequence`, `level`, `tag`, `message`, `formatted`, `timeText`, and `uptimeMs`.
+`TraceLog` stores `sequence`, `level`, `tag`, `message`, `formatted`, `timeText`, `uptimeMs`, and `truncated`.
 
 Without Tempo, `formatted` uses:
 
@@ -89,6 +91,8 @@ With Tempo, `formatted` uses:
 
 Callbacks should avoid long blocking work and should not recursively log through the same Trace instance.
 
+`onLog()` and stream output are delivered from a dedicated realtime queue controlled by `TraceConfig::maxRealtimeLogs`. They do not depend on `maxRecentLogs`.
+
 ## Stream output
 
 `setStream()` writes formatted realtime logs to any Arduino `Print` stream.
@@ -100,6 +104,14 @@ trace.setStream(&client);
 trace.setStream(nullptr);
 ```
 
-Trace does not own the stream. Keep the stream alive while it is attached. Stream output runs from the internal Trace task and coexists with `onLog()` when both are configured.
+Trace does not own the stream. Keep the stream alive until `Trace::end()` completes. Stream output runs from the internal Trace task and coexists with `onLog()` when both are configured.
+
+Calling `setStream(nullptr)` or replacing the stream while Trace is active does not synchronize already snapshotted worker use. Use `Trace::end()` as the synchronization point before destroying an attached stream.
 
 Stream output uses ANSI colors by default when `TraceConfig::enableColors` is `true`. `onLog()`, `onFlush()`, and query helpers receive plain `TraceLog::formatted` text without color codes.
+
+## Tempo lifetime
+
+Trace does not own attached `Tempo` instances. Keep the attached `Tempo` alive until `Trace::end()` completes.
+
+Calling `detachTempo()` or attaching another `Tempo` while Trace is active does not synchronize already snapshotted worker use.
