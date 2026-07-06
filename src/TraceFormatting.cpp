@@ -19,6 +19,13 @@ bool isErrorLevel(TraceLevel level) {
 	return level == TraceLevel::Error || level == TraceLevel::Fatal;
 }
 
+size_t effectiveLimit(size_t limit, size_t maximum) {
+	if (limit == 0 || limit > maximum) {
+		return maximum;
+	}
+	return limit;
+}
+
 size_t clampedLimit(size_t length, size_t limit) {
 	if (limit == 0 || length <= limit) {
 		return length;
@@ -47,25 +54,20 @@ std::string formatPrintf(const char *format, va_list args, size_t limit, bool &t
 		return std::string();
 	}
 
-	char stackBuffer[kFormatBufferSize];
+	char stackBuffer[kFormatBufferSize + 1] = {};
+	const size_t effective = effectiveLimit(limit, TRACE_FORMATTED_BUFFER_LENGTH);
 	va_list copy;
 	va_copy(copy, args);
-	const int needed = vsnprintf(stackBuffer, sizeof(stackBuffer), format, copy);
+	const int needed = vsnprintf(stackBuffer, effective + 1, format, copy);
 	va_end(copy);
 
 	if (needed < 0) {
 		return std::string();
 	}
 	const size_t outputLength = static_cast<size_t>(needed);
-	const size_t boundedLength = clampedLimit(outputLength, limit);
-	truncated = limit > 0 && outputLength > limit;
-	if (boundedLength < sizeof(stackBuffer)) {
-		return std::string(stackBuffer, boundedLength);
-	}
-
-	std::vector<char> buffer(boundedLength + 1);
-	vsnprintf(buffer.data(), buffer.size(), format, args);
-	return std::string(buffer.data());
+	const size_t boundedLength = std::min(outputLength, effective);
+	truncated = outputLength > effective;
+	return std::string(stackBuffer, boundedLength);
 }
 
 std::string jsonToString(
@@ -76,19 +78,31 @@ std::string jsonToString(
 ) {
 	const size_t measuredLength =
 	    format == TraceJsonFormat::Pretty ? measureJsonPretty(doc) : measureJson(doc);
-	const size_t boundedLength = clampedLimit(measuredLength, limit);
-	truncated = limit > 0 && measuredLength > limit;
+	const size_t effective = effectiveLimit(limit, TRACE_FORMATTED_BUFFER_LENGTH);
+	const size_t boundedLength = std::min(measuredLength, effective);
+	truncated = measuredLength > effective;
 
-	std::vector<char> buffer(boundedLength + 1);
+	char buffer[TRACE_FORMATTED_BUFFER_LENGTH + 1] = {};
 	if (format == TraceJsonFormat::Pretty) {
-		serializeJsonPretty(doc, buffer.data(), buffer.size());
+		serializeJsonPretty(doc, buffer, boundedLength + 1);
 	} else {
-		serializeJson(doc, buffer.data(), buffer.size());
+		serializeJson(doc, buffer, boundedLength + 1);
 	}
 	buffer[boundedLength] = '\0';
-	return std::string(buffer.data());
+	return std::string(buffer);
 }
 } // namespace trace_detail
+
+TraceLog TraceImpl::toPublicLog(const TraceRecord &record) {
+	TraceLog log;
+	log.sequence = record.sequence;
+	log.level = record.level;
+	log.tag = record.tag;
+	log.message = record.message;
+	log.uptimeMs = record.uptimeMs;
+	log.truncated = record.truncated;
+	return log;
+}
 
 void TraceImpl::formatLog(TraceLog &log) {
 	char timeBuffer[trace_detail::kTimeBufferSize] = {};

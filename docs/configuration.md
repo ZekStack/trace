@@ -1,6 +1,6 @@
 # Configuration
 
-`TraceConfig` controls the internal task, log limits, flush timing, overflow behavior, JSON formatting, level filtering, and stream colors.
+`TraceConfig` controls the internal task, log storage memory, log limits, flush timing, overflow behavior, JSON formatting, level filtering, and stream colors.
 
 ```cpp
 TraceConfig config;
@@ -8,6 +8,7 @@ config.stackSize = 4096;
 config.priority = 1;
 config.coreId = tskNO_AFFINITY;
 config.stackType = TraceStackType::Auto;
+config.storageMemory = TraceStorageMemory::Internal;
 config.maxRecentLogs = 100;
 config.maxRealtimeLogs = 100;
 config.maxPendingLogs = 50;
@@ -35,7 +36,17 @@ config.maxFormattedLength = 384;
 
 `maxPendingLogs = 0` disables persistence buffering. Logs are still accepted for recent history and realtime delivery, but they are counted as dropped for persistence.
 
-Queue-count `0` means disabled. Payload-cap `0` means unlimited.
+Queue-count `0` means disabled. Payload-cap `0` means use the compiled maximum for that payload type.
+
+## Storage memory
+
+Trace stores recent, realtime, and pending logs in fixed-capacity ring buffers. Each enabled queue is allocated once during `init()`.
+
+`TraceStorageMemory::Internal` is the deterministic default. Recent, realtime, and pending queues use internal-capable memory.
+
+`TraceStorageMemory::PreferPsram` uses PSRAM for recent and pending queues when PSRAM is available, otherwise it falls back to internal-capable memory. The realtime queue remains internal.
+
+`TraceStorageMemory::RequirePsram` requires recent and pending queues to allocate in PSRAM. `init()` returns `TraceStatus::OutOfMemory` if PSRAM is unavailable or allocation fails. The realtime queue remains internal.
 
 ## Payload limits
 
@@ -44,6 +55,17 @@ Queue-count `0` means disabled. Payload-cap `0` means unlimited.
 `maxMessageLength` applies to direct message logging APIs.
 
 `maxFormattedLength` applies to `printf`-style and JSON-formatted input before it becomes `TraceLog::message`.
+
+Runtime payload limits are bounded by compile-time caps:
+
+```cpp
+TRACE_RECORD_MAX_TAG_LENGTH
+TRACE_RECORD_MAX_MESSAGE_LENGTH
+TRACE_FORMATTED_BUFFER_LENGTH
+TRACE_TIME_TEXT_BUFFER_LENGTH
+```
+
+Setting a runtime limit above the compiled cap clamps to the compiled cap. Setting a runtime payload limit to `0` uses the compiled cap.
 
 When Trace truncates a log, `TraceLog::truncated` is set. `TraceDiag::truncatedLogCount` increments once per log record, even if both tag and message were truncated.
 

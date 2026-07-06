@@ -67,6 +67,8 @@ std::vector<TraceLog> getLastLogs(size_t count);
 std::vector<TraceLog> getLogsByTag(const char *tag);
 ```
 
+`TraceDiag` includes queue counts, drop and flush counters, task stack information, queue allocation byte counts, and PSRAM placement flags for recent, realtime, and pending queues.
+
 ## TraceLog
 
 `TraceLog` stores `sequence`, `level`, `tag`, `message`, `formatted`, `timeText`, `uptimeMs`, and `truncated`.

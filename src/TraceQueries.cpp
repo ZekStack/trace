@@ -1,5 +1,7 @@
 #include "internal/TraceImpl.h"
 
+#include <cstring>
+
 TraceDiag Trace::getDiagnostics() {
 	TraceDiag diag;
 	TraceLock lock(_impl->mutex);
@@ -20,6 +22,12 @@ TraceDiag Trace::getDiagnostics() {
 	diag.stackHighWaterMarkBytes = _impl->stackHighWaterMarkBytes;
 	diag.requestedStackType = _impl->config.stackType;
 	diag.actualStackType = _impl->actualStackType;
+	diag.recentAllocatedBytes = _impl->recentLogs.allocatedBytes();
+	diag.realtimeAllocatedBytes = _impl->realtimeLogs.allocatedBytes();
+	diag.pendingAllocatedBytes = _impl->pendingLogs.allocatedBytes();
+	diag.recentLogsInPsram = _impl->recentLogs.usingPsram();
+	diag.realtimeLogsInPsram = _impl->realtimeLogs.usingPsram();
+	diag.pendingLogsInPsram = _impl->pendingLogs.usingPsram();
 	return diag;
 }
 
@@ -30,7 +38,11 @@ TraceLog Trace::getLastLog() {
 		if (!lock || _impl->recentLogs.empty()) {
 			return log;
 		}
-		log = _impl->recentLogs.back();
+		TraceRecord record;
+		if (!_impl->recentLogs.peek(_impl->recentLogs.size() - 1, record)) {
+			return log;
+		}
+		log = _impl->toPublicLog(record);
 	}
 	_impl->formatLog(log);
 	return log;
@@ -43,7 +55,13 @@ std::vector<TraceLog> Trace::getLogs() {
 		if (!lock) {
 			return logs;
 		}
-		logs = _impl->recentLogs;
+		logs.reserve(_impl->recentLogs.size());
+		for (size_t i = 0; i < _impl->recentLogs.size(); ++i) {
+			TraceRecord record;
+			if (_impl->recentLogs.peek(i, record)) {
+				logs.push_back(_impl->toPublicLog(record));
+			}
+		}
 	}
 	for (TraceLog &log : logs) {
 		_impl->formatLog(log);
@@ -58,9 +76,10 @@ std::vector<TraceLog> Trace::getLogs(TraceLevel level) {
 		if (!lock) {
 			return logs;
 		}
-		for (const TraceLog &log : _impl->recentLogs) {
-			if (log.level == level) {
-				logs.push_back(log);
+		for (size_t i = 0; i < _impl->recentLogs.size(); ++i) {
+			TraceRecord record;
+			if (_impl->recentLogs.peek(i, record) && record.level == level) {
+				logs.push_back(_impl->toPublicLog(record));
 			}
 		}
 	}
@@ -79,7 +98,10 @@ std::vector<TraceLog> Trace::getLastLogs(size_t count) {
 		}
 		const size_t start = count >= _impl->recentLogs.size() ? 0 : _impl->recentLogs.size() - count;
 		for (size_t i = start; i < _impl->recentLogs.size(); ++i) {
-			logs.push_back(_impl->recentLogs[i]);
+			TraceRecord record;
+			if (_impl->recentLogs.peek(i, record)) {
+				logs.push_back(_impl->toPublicLog(record));
+			}
 		}
 	}
 	for (TraceLog &log : logs) {
@@ -98,9 +120,10 @@ std::vector<TraceLog> Trace::getLogsByTag(const char *tag) {
 		if (!lock) {
 			return logs;
 		}
-		for (const TraceLog &log : _impl->recentLogs) {
-			if (log.tag == tag) {
-				logs.push_back(log);
+		for (size_t i = 0; i < _impl->recentLogs.size(); ++i) {
+			TraceRecord record;
+			if (_impl->recentLogs.peek(i, record) && strcmp(record.tag, tag) == 0) {
+				logs.push_back(_impl->toPublicLog(record));
 			}
 		}
 	}

@@ -3,8 +3,9 @@
 #include <Arduino.h>
 #include <cstddef>
 
-extern "C" {
 #include "esp_heap_caps.h"
+
+extern "C" {
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 }

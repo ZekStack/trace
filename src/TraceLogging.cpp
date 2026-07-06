@@ -1,6 +1,36 @@
 #include "internal/TraceImpl.h"
 
-TraceResult TraceImpl::appendLog(TraceLog log) {
+#include <cstring>
+
+namespace {
+void copyToRecordField(
+    const char *source,
+    size_t sourceLength,
+    size_t configuredLimit,
+    char *target,
+    size_t targetCapacity,
+    bool &truncated
+) {
+	if (target == nullptr || targetCapacity == 0) {
+		return;
+	}
+	target[0] = '\0';
+	if (source == nullptr) {
+		return;
+	}
+	const size_t effective = trace_detail::effectiveLimit(configuredLimit, targetCapacity - 1);
+	const size_t copied = std::min(sourceLength, effective);
+	if (copied > 0) {
+		memcpy(target, source, copied);
+	}
+	target[copied] = '\0';
+	if (sourceLength > effective) {
+		truncated = true;
+	}
+}
+} // namespace
+
+TraceResult TraceImpl::appendLog(TraceRecord record) {
 	bool recentAdded = false;
 	const uint64_t startedMs = millis();
 
@@ -20,11 +50,11 @@ TraceResult TraceImpl::appendLog(TraceLog log) {
 			}
 
 			if (!recentAdded) {
-				log.sequence = nextSequence++;
-				addRecentLocked(log);
-				addRealtimeLocked(log);
-				lastLogAtMs = log.uptimeMs;
-				if (log.truncated) {
+				record.sequence = nextSequence++;
+				addRecentLocked(record);
+				addRealtimeLocked(record);
+				lastLogAtMs = record.uptimeMs;
+				if (record.truncated) {
 					truncatedLogCount++;
 				}
 				recentAdded = true;
@@ -33,12 +63,10 @@ TraceResult TraceImpl::appendLog(TraceLog log) {
 			if (config.maxPendingLogs == 0) {
 				droppedLogCount++;
 				shouldNotify = true;
-			} else if (pendingLogs.size() < config.maxPendingLogs) {
-				pendingLogs.push_back(log);
+			} else if (pendingLogs.pushDropNewest(record)) {
 				shouldNotify = true;
 			} else if (config.overflowPolicy == TraceOverflowPolicy::DropOldestPending) {
-				pendingLogs.erase(pendingLogs.begin());
-				pendingLogs.push_back(log);
+				pendingLogs.pushDropOldest(record);
 				droppedLogCount++;
 				shouldNotify = true;
 			} else if (config.overflowPolicy == TraceOverflowPolicy::DropNewest) {
@@ -56,7 +84,7 @@ TraceResult TraceImpl::appendLog(TraceLog log) {
 			if (config.flushEveryLogs > 0 && pendingLogs.size() >= config.flushEveryLogs) {
 				flushRequested = true;
 			}
-			if (config.flushOnError && trace_detail::isErrorLevel(log.level)) {
+			if (config.flushOnError && trace_detail::isErrorLevel(record.level)) {
 				urgentFlushRequested = true;
 				flushRequested = true;
 			}
@@ -82,25 +110,21 @@ TraceResult TraceImpl::appendLog(TraceLog log) {
 	}
 }
 
-void TraceImpl::addRecentLocked(const TraceLog &log) {
+void TraceImpl::addRecentLocked(const TraceRecord &record) {
 	if (config.maxRecentLogs == 0) {
 		return;
 	}
-	while (recentLogs.size() >= config.maxRecentLogs) {
-		recentLogs.erase(recentLogs.begin());
-	}
-	recentLogs.push_back(log);
+	recentLogs.pushDropOldest(record);
 }
 
-void TraceImpl::addRealtimeLocked(const TraceLog &log) {
+void TraceImpl::addRealtimeLocked(const TraceRecord &record) {
 	if (config.maxRealtimeLogs == 0 || (!onLog && stream == nullptr)) {
 		return;
 	}
-	while (realtimeLogs.size() >= config.maxRealtimeLogs) {
-		realtimeLogs.erase(realtimeLogs.begin());
+	if (realtimeLogs.full()) {
 		droppedRealtimeLogCount++;
 	}
-	realtimeLogs.push_back(log);
+	realtimeLogs.pushDropOldest(record);
 	realtimeLogCount++;
 }
 
@@ -108,7 +132,7 @@ void TraceImpl::processRealtimeLogs() {
 	TraceLogCallback callback;
 	Print *streamSnapshot = nullptr;
 	bool colorsEnabled = true;
-	std::vector<TraceLog> logs;
+	std::vector<TraceRecord> records;
 	{
 		TraceLock lock(mutex);
 		if (!lock) {
@@ -121,10 +145,15 @@ void TraceImpl::processRealtimeLogs() {
 			realtimeLogs.clear();
 			return;
 		}
-		logs.swap(realtimeLogs);
+		records.reserve(realtimeLogs.size());
+		TraceRecord record;
+		while (realtimeLogs.pop(record)) {
+			records.push_back(record);
+		}
 	}
 
-	for (TraceLog &log : logs) {
+	for (const TraceRecord &record : records) {
+		TraceLog log = toPublicLog(record);
 		formatLog(log);
 		if (streamSnapshot != nullptr) {
 			const char *color = colorsEnabled ? levelColor(log.level) : "";
@@ -145,9 +174,12 @@ void TraceImpl::processRealtimeLogs() {
 size_t Trace::getMaxFormattedLength() const {
 	TraceLock lock(_impl->mutex);
 	if (!lock) {
-		return TraceConfig().maxFormattedLength;
+		return TRACE_FORMATTED_BUFFER_LENGTH;
 	}
-	return _impl->config.maxFormattedLength;
+	return trace_detail::effectiveLimit(
+	    _impl->config.maxFormattedLength,
+	    TRACE_FORMATTED_BUFFER_LENGTH
+	);
 }
 
 TraceResult Trace::log(TraceLevel level, const char *tag, const std::string &message) {
@@ -158,10 +190,7 @@ TraceResult Trace::log(TraceLevel level, const char *tag, const std::string &mes
 			config = _impl->config;
 		}
 	}
-	bool messageTruncated = false;
-	const std::string boundedMessage =
-	    trace_detail::truncateString(message, config.maxMessageLength, messageTruncated);
-	return log(level, tag, boundedMessage, messageTruncated);
+	return log(level, tag, message, false);
 }
 
 TraceResult Trace::log(
@@ -190,14 +219,28 @@ TraceResult Trace::log(
 		return TraceResult::success("log filtered");
 	}
 
-	bool tagTruncated = false;
-	TraceLog log;
-	log.level = level;
-	log.tag = trace_detail::copyLimited(tag, config.maxTagLength, tagTruncated);
-	log.message = message;
-	log.uptimeMs = millis();
-	log.truncated = tagTruncated || messageTruncated;
-	return _impl->appendLog(log);
+	bool truncated = messageTruncated;
+	TraceRecord record;
+	record.level = level;
+	record.uptimeMs = millis();
+	copyToRecordField(
+	    tag,
+	    strlen(tag),
+	    config.maxTagLength,
+	    record.tag,
+	    sizeof(record.tag),
+	    truncated
+	);
+	copyToRecordField(
+	    message.c_str(),
+	    message.size(),
+	    config.maxMessageLength,
+	    record.message,
+	    sizeof(record.message),
+	    truncated
+	);
+	record.truncated = truncated;
+	return _impl->appendLog(record);
 }
 
 TraceResult Trace::logJson(TraceLevel level, const char *tag, const JsonDocument &doc) {

@@ -17,8 +17,14 @@ void TraceImpl::performFlush() {
 			return;
 		}
 		callback = onFlush;
-		batch.logs = pendingLogs;
 		batch.createdAtUptimeMs = millis();
+		batch.logs.reserve(pendingLogs.size());
+		for (size_t i = 0; i < pendingLogs.size(); ++i) {
+			TraceRecord record;
+			if (pendingLogs.peek(i, record)) {
+				batch.logs.push_back(toPublicLog(record));
+			}
+		}
 		if (!batch.logs.empty()) {
 			maxSequence = batch.logs.back().sequence;
 		}
@@ -46,16 +52,10 @@ void TraceImpl::performFlush() {
 		if (flushResult == TraceFlushResult::Ok) {
 			nextFlushAttemptMs = 0;
 			if (maxSequence > 0) {
-				pendingLogs.erase(
-				    std::remove_if(
-				        pendingLogs.begin(),
-				        pendingLogs.end(),
-				        [maxSequence](const TraceLog &log) {
-					        return log.sequence <= maxSequence;
-				        }
-				    ),
-				    pendingLogs.end()
-				);
+				TraceRecord record;
+				while (pendingLogs.peek(0, record) && record.sequence <= maxSequence) {
+					pendingLogs.pop(record);
+				}
 			}
 			flushSuccessCount++;
 		} else if (flushResult == TraceFlushResult::Retry) {

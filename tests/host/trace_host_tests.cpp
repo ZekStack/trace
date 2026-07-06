@@ -1,4 +1,5 @@
 #include <Trace.h>
+#include "esp_heap_caps.h"
 
 #include <atomic>
 #include <cstdlib>
@@ -350,6 +351,191 @@ void shutdownResults(TestRunner &runner) {
 	}
 }
 
+void storageAllocationPolicies(TestRunner &runner) {
+	resetClock();
+	trace_host_heap::reset();
+	trace_host_heap::psramAvailable = true;
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		runner.check(trace.init(config), "init default internal storage");
+		TraceDiag diag = trace.getDiagnostics();
+		runner.check(!diag.recentLogsInPsram, "default recent storage is internal");
+		runner.check(!diag.realtimeLogsInPsram, "realtime storage is internal");
+		runner.check(!diag.pendingLogsInPsram, "default pending storage is internal");
+		runner.check(diag.recentAllocatedBytes > 0, "recent allocated bytes reported");
+		runner.check(diag.realtimeAllocatedBytes > 0, "realtime allocated bytes reported");
+		runner.check(diag.pendingAllocatedBytes > 0, "pending allocated bytes reported");
+		runner.check(trace.end(), "end default internal storage");
+	}
+
+	resetClock();
+	trace_host_heap::reset();
+	trace_host_heap::psramAvailable = true;
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.storageMemory = TraceStorageMemory::PreferPsram;
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		runner.check(trace.init(config), "init PreferPsram storage");
+		TraceDiag diag = trace.getDiagnostics();
+		runner.check(diag.recentLogsInPsram, "PreferPsram recent uses PSRAM");
+		runner.check(!diag.realtimeLogsInPsram, "PreferPsram realtime remains internal");
+		runner.check(diag.pendingLogsInPsram, "PreferPsram pending uses PSRAM");
+		runner.check(trace.end(), "end PreferPsram storage");
+	}
+
+	resetClock();
+	trace_host_heap::reset();
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.storageMemory = TraceStorageMemory::PreferPsram;
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		runner.check(trace.init(config), "init PreferPsram fallback storage");
+		TraceDiag diag = trace.getDiagnostics();
+		runner.check(!diag.recentLogsInPsram, "PreferPsram recent falls back to internal");
+		runner.check(!diag.pendingLogsInPsram, "PreferPsram pending falls back to internal");
+		runner.check(trace.end(), "end PreferPsram fallback storage");
+	}
+
+	resetClock();
+	trace_host_heap::reset();
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.storageMemory = TraceStorageMemory::RequirePsram;
+		config.maxRecentLogs = 2;
+		config.maxRealtimeLogs = 2;
+		config.maxPendingLogs = 2;
+		TraceResult result = trace.init(config);
+		runner.check(
+		    !result && result.status == TraceStatus::OutOfMemory,
+		    "RequirePsram fails without PSRAM"
+		);
+		runner.check(
+		    trace_host_heap::activeAllocations == 0,
+		    "RequirePsram failure leaves no allocations"
+		);
+	}
+}
+
+void partialAllocationCleanup(TestRunner &runner) {
+	resetClock();
+	trace_host_heap::reset();
+	trace_host_heap::allocationsBeforeFailure = 2;
+	Trace trace;
+	TraceConfig config = baseConfig();
+	config.maxRecentLogs = 2;
+	config.maxRealtimeLogs = 2;
+	config.maxPendingLogs = 2;
+	TraceResult result = trace.init(config);
+	runner.check(
+	    !result && result.status == TraceStatus::OutOfMemory,
+	    "partial allocation init fails"
+	);
+	runner.check(
+	    trace_host_heap::activeAllocations == 0,
+	    "partial allocation failure frees previous buffers"
+	);
+}
+
+void enqueueDoesNotAllocateAfterInit(TestRunner &runner) {
+	resetClock();
+	trace_host_heap::reset();
+	Trace trace;
+	TraceConfig config = baseConfig();
+	config.maxRecentLogs = 4;
+	config.maxRealtimeLogs = 4;
+	config.maxPendingLogs = 4;
+	runner.check(trace.init(config), "init enqueueDoesNotAllocateAfterInit");
+	const size_t allocationsAfterInit = trace_host_heap::allocationCount;
+	runner.check(trace.info("HOT", "ok"), "log enqueueDoesNotAllocateAfterInit");
+	runner.check(
+	    trace_host_heap::allocationCount == allocationsAfterInit,
+	    "accepted internal enqueue does not heap-cap allocate"
+	);
+	runner.check(trace.end(), "end enqueueDoesNotAllocateAfterInit");
+}
+
+void ringOrderAndSequenceConsistency(TestRunner &runner) {
+	resetClock();
+	trace_host_heap::reset();
+	Trace trace;
+	std::vector<uint64_t> realtimeSequences;
+	std::vector<uint64_t> flushedSequences;
+	trace.onLog([&realtimeSequences](const TraceLog &log) {
+		realtimeSequences.push_back(log.sequence);
+	});
+	trace.onFlush([&flushedSequences](const TraceLogBatch &batch) {
+		for (const TraceLog &log : batch.logs) {
+			flushedSequences.push_back(log.sequence);
+		}
+		return TraceFlushResult::Ok;
+	});
+
+	TraceConfig config = baseConfig();
+	config.maxRecentLogs = 3;
+	config.maxRealtimeLogs = 5;
+	config.maxPendingLogs = 3;
+	config.overflowPolicy = TraceOverflowPolicy::DropOldestPending;
+	runner.check(trace.init(config), "init ringOrderAndSequenceConsistency");
+	for (int i = 1; i <= 5; ++i) {
+		runner.check(trace.infof("SEQ", "item=%d", i), "sequence log");
+	}
+	runner.check(
+	    waitUntil([&realtimeSequences]() { return realtimeSequences.size() == 5; }),
+	    "realtime sees five logs"
+	);
+	std::vector<TraceLog> recent = trace.getLogs();
+	runner.check(
+	    recent.size() == 3 && recent[0].sequence == 3 && recent[1].sequence == 4 &&
+	        recent[2].sequence == 5,
+	    "recent query returns wrapped records oldest-to-newest"
+	);
+	runner.check(
+	    realtimeSequences.size() == 5 && realtimeSequences[0] == 1 && realtimeSequences[1] == 2 &&
+	        realtimeSequences[2] == 3 && realtimeSequences[3] == 4 && realtimeSequences[4] == 5,
+	    "realtime callback order is oldest-to-newest"
+	);
+	runner.check(trace.flushAndWait(1000), "flush ringOrderAndSequenceConsistency");
+	runner.check(
+	    flushedSequences.size() == 3 && flushedSequences[0] == 3 && flushedSequences[1] == 4 &&
+	        flushedSequences[2] == 5,
+	    "flush batch returns wrapped pending records oldest-to-newest"
+	);
+	runner.check(trace.end(), "end ringOrderAndSequenceConsistency");
+}
+
+void runtimeCapClamping(TestRunner &runner) {
+	resetClock();
+	trace_host_heap::reset();
+	Trace trace;
+	TraceConfig config = baseConfig();
+	config.maxTagLength = TRACE_RECORD_MAX_TAG_LENGTH + 100;
+	config.maxMessageLength = 0;
+	config.maxFormattedLength = 0;
+	runner.check(trace.init(config), "init runtimeCapClamping");
+	std::string longTag(TRACE_RECORD_MAX_TAG_LENGTH + 10, 'T');
+	std::string longMessage(TRACE_RECORD_MAX_MESSAGE_LENGTH + 10, 'M');
+	runner.check(trace.info(longTag.c_str(), longMessage), "log runtimeCapClamping");
+	TraceLog log = trace.getLastLog();
+	runner.check(log.tag.size() == TRACE_RECORD_MAX_TAG_LENGTH, "tag cap clamps to compile maximum");
+	runner.check(
+	    log.message.size() == TRACE_RECORD_MAX_MESSAGE_LENGTH,
+	    "message zero runtime cap uses compile maximum"
+	);
+	runner.check(log.truncated, "runtime cap clamping marks truncation");
+	runner.check(trace.end(), "end runtimeCapClamping");
+}
+
 } // namespace
 
 int main() {
@@ -364,6 +550,11 @@ int main() {
 	callbacksRunOutsideLock(runner);
 	truncation(runner);
 	shutdownResults(runner);
+	storageAllocationPolicies(runner);
+	partialAllocationCleanup(runner);
+	enqueueDoesNotAllocateAfterInit(runner);
+	ringOrderAndSequenceConsistency(runner);
+	runtimeCapClamping(runner);
 
 	if (runner.failed != 0) {
 		std::cerr << runner.failed << " host Trace tests failed\n";

@@ -13,6 +13,22 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#ifndef TRACE_RECORD_MAX_TAG_LENGTH
+#define TRACE_RECORD_MAX_TAG_LENGTH 32
+#endif
+
+#ifndef TRACE_RECORD_MAX_MESSAGE_LENGTH
+#define TRACE_RECORD_MAX_MESSAGE_LENGTH 256
+#endif
+
+#ifndef TRACE_FORMATTED_BUFFER_LENGTH
+#define TRACE_FORMATTED_BUFFER_LENGTH 384
+#endif
+
+#ifndef TRACE_TIME_TEXT_BUFFER_LENGTH
+#define TRACE_TIME_TEXT_BUFFER_LENGTH 48
+#endif
+
 class Tempo;
 struct TraceImpl;
 
@@ -41,6 +57,12 @@ enum class TraceStackType : uint8_t {
 	Auto,
 	Internal,
 	Psram,
+};
+
+enum class TraceStorageMemory : uint8_t {
+	Internal,
+	PreferPsram,
+	RequirePsram,
 };
 
 enum class TraceOverflowPolicy : uint8_t {
@@ -89,6 +111,7 @@ struct TraceConfig {
 	UBaseType_t priority = 1;
 	BaseType_t coreId = tskNO_AFFINITY;
 	TraceStackType stackType = TraceStackType::Auto;
+	TraceStorageMemory storageMemory = TraceStorageMemory::Internal;
 	size_t maxRecentLogs = 100;
 	size_t maxRealtimeLogs = 100;
 	size_t maxPendingLogs = 50;
@@ -146,6 +169,12 @@ struct TraceDiag {
 	size_t stackHighWaterMarkBytes = 0;
 	TraceStackType requestedStackType = TraceStackType::Auto;
 	TraceStackType actualStackType = TraceStackType::Internal;
+	size_t recentAllocatedBytes = 0;
+	size_t realtimeAllocatedBytes = 0;
+	size_t pendingAllocatedBytes = 0;
+	bool recentLogsInPsram = false;
+	bool realtimeLogsInPsram = false;
+	bool pendingLogsInPsram = false;
 };
 
 using TraceTimeFormatter = bool (*)(const Tempo &tempo, char *buffer, size_t bufferSize);
@@ -260,12 +289,11 @@ class Trace {
 			return TraceResult::failure(TraceStatus::InvalidArgument, "format failed");
 		}
 		const size_t limit = getMaxFormattedLength();
-		const bool unlimited = limit == 0;
 		const size_t outputLength = static_cast<size_t>(needed);
-		const size_t boundedLength = unlimited ? outputLength : std::min(outputLength, limit);
-		std::vector<char> buffer(boundedLength + 1);
-		snprintf(buffer.data(), buffer.size(), format, args...);
-		return log(level, tag, std::string(buffer.data()), !unlimited && outputLength > limit);
+		const size_t boundedLength = std::min(outputLength, limit);
+		char buffer[TRACE_FORMATTED_BUFFER_LENGTH + 1] = {};
+		snprintf(buffer, boundedLength + 1, format, args...);
+		return log(level, tag, std::string(buffer), outputLength > limit);
 	}
 
 	size_t getMaxFormattedLength() const;
