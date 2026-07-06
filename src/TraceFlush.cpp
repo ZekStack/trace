@@ -76,13 +76,19 @@ bool TraceImpl::shouldFlushNow() {
 	if (!lock) {
 		return false;
 	}
+	const uint64_t nowMs = millis();
+	if (
+	    !pendingLogs.empty() && nextFlushAttemptMs > 0 && nowMs < nextFlushAttemptMs &&
+	    !urgentFlushRequested
+	) {
+		return false;
+	}
 	if (flushRequested || urgentFlushRequested) {
 		return true;
 	}
 	if (pendingLogs.empty()) {
 		return false;
 	}
-	const uint64_t nowMs = millis();
 	if (nextFlushAttemptMs > 0) {
 		return nowMs >= nextFlushAttemptMs;
 	}

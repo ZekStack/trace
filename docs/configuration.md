@@ -42,6 +42,10 @@ Queue-count `0` means disabled. Payload-cap `0` means use the compiled maximum f
 
 Trace stores recent, realtime, and pending logs in fixed-capacity ring buffers. Each enabled queue is allocated once during `init()`.
 
+After `Trace::init()`, accepted direct C-string log calls do not allocate on the internal enqueue path when all target queues have capacity and no output-boundary conversion is triggered.
+
+This guarantee is intentionally narrow. Query APIs allocate `std::vector<TraceLog>`, flush batch conversion and `onLog()` conversion can allocate because public `TraceLog` contains `std::string`, stream implementations may allocate internally, and user code may allocate before passing `std::string` values to Trace.
+
 `TraceStorageMemory::Internal` is the deterministic default. Recent, realtime, and pending queues use internal-capable memory.
 
 `TraceStorageMemory::PreferPsram` uses PSRAM for recent and pending queues when PSRAM is available, otherwise it falls back to internal-capable memory. The realtime queue remains internal.
@@ -78,7 +82,7 @@ Trace flushes pending logs when:
 * `flushIntervalMs` elapses with pending logs.
 * `flushOnError` is enabled and an `Error` or `Fatal` log is queued.
 
-`retryIntervalMs` controls the delay after `TraceFlushResult::Retry`. Values smaller than the worker poll interval are clamped so retry cannot spin in a tight loop.
+`retryIntervalMs` controls the delay after `TraceFlushResult::Retry`. Values smaller than the worker poll interval are clamped so retry cannot spin in a tight loop. Normal flush requests set `flushRequested` but do not clear or bypass the retry deadline. Urgent error and fatal flush requests may bypass the retry deadline.
 
 ## Flush results
 
@@ -96,7 +100,7 @@ Trace flushes pending logs when:
 
 `BlockCaller` requests a flush and waits up to `blockCallerTimeoutMs` for pending space.
 
-`FlushImmediately` requests a flush immediately and retries until space appears or `blockCallerTimeoutMs` expires.
+`FlushImmediately` requests a flush immediately and queues the new record only if pending space becomes available before `blockCallerTimeoutMs` expires.
 
 ## Stack policy
 

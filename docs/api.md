@@ -12,7 +12,7 @@
 
 `TraceFlushResult` values are `Ok`, `Failed`, and `Retry`.
 
-`Ok` removes flushed pending logs. `Failed` is terminal for the current `flushAndWait()` call but retains pending logs. `Retry` retains pending logs, schedules another attempt using `TraceConfig::retryIntervalMs`, and keeps `flushAndWait()` waiting until `Ok`, `Failed`, or timeout.
+`Ok` removes flushed pending logs. `Failed` is terminal for the current `flushAndWait()` call but retains pending logs. `Retry` retains pending logs, schedules another attempt using `TraceConfig::retryIntervalMs`, and keeps `flushAndWait()` waiting until `Ok`, `Failed`, or timeout. Normal flush requests do not bypass the retry deadline; urgent error and fatal flush requests may bypass it.
 
 ## Main methods
 

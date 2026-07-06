@@ -11,22 +11,11 @@
 
 namespace trace_detail {
 inline constexpr uint32_t kWaitPollMs = 10;
-inline constexpr size_t kFormatBufferSize = TRACE_FORMATTED_BUFFER_LENGTH;
 inline constexpr size_t kTimeBufferSize = TRACE_TIME_TEXT_BUFFER_LENGTH;
 
 bool levelEnabled(TraceLevel level, TraceLevel minLevel);
 bool isErrorLevel(TraceLevel level);
 size_t effectiveLimit(size_t limit, size_t maximum);
-size_t clampedLimit(size_t length, size_t limit);
-std::string copyLimited(const char *value, size_t limit, bool &truncated);
-std::string truncateString(const std::string &value, size_t limit, bool &truncated);
-std::string formatPrintf(const char *format, va_list args, size_t limit, bool &truncated);
-std::string jsonToString(
-    const JsonDocument &doc,
-    TraceJsonFormat format,
-    size_t limit,
-    bool &truncated
-);
 } // namespace trace_detail
 
 struct TraceImpl {

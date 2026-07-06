@@ -271,6 +271,14 @@ class Trace {
 
   private:
 	TraceResult log(TraceLevel level, const char *tag, const std::string &message);
+	TraceResult logRaw(
+	    TraceLevel level,
+	    const char *tag,
+	    size_t tagLen,
+	    const char *message,
+	    size_t messageLen,
+	    bool alreadyTruncated
+	);
 	TraceResult logJson(TraceLevel level, const char *tag, const JsonDocument &doc);
 	TraceResult logVPrintf(TraceLevel level, const char *tag, const char *format, va_list args);
 
@@ -293,9 +301,14 @@ class Trace {
 		const size_t boundedLength = std::min(outputLength, limit);
 		char buffer[TRACE_FORMATTED_BUFFER_LENGTH + 1] = {};
 		snprintf(buffer, boundedLength + 1, format, args...);
-		return log(level, tag, std::string(buffer), outputLength > limit);
+		const size_t tagLimit = getMaxTagLength();
+		const size_t tagLen = boundedStrLen(tag, tagLimit + 1);
+		return logRaw(level, tag, tagLen, buffer, boundedLength, outputLength > limit);
 	}
 
+	static size_t boundedStrLen(const char *value, size_t maxLen);
+	size_t getMaxTagLength() const;
+	size_t getMaxMessageLength() const;
 	size_t getMaxFormattedLength() const;
 	TraceResult log(
 	    TraceLevel level,

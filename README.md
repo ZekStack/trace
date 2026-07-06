@@ -83,6 +83,8 @@ void loop() {
 * Queue-count `0` disables that queue. Payload-cap `0` uses the compiled maximum for that payload type.
 * `setStream()` writes formatted realtime logs to any Arduino `Print` stream such as `Serial`, `Serial1`, `WiFiClient`, or a custom sink.
 * Stream output uses ANSI colors by default. Callback, flush, and query `TraceLog::formatted` values stay plain text.
+* After `Trace::init()`, accepted direct C-string log calls do not allocate on the internal enqueue path when all target queues have capacity and no output-boundary conversion is triggered.
+* Query APIs, flush batch conversion, `onLog()` conversion, stream implementations, and user-created `std::string` values may still allocate.
 * `onLog()` is for realtime observation; `onFlush()` is for persistence.
 * Callbacks should avoid long blocking work and should not recursively call Trace logging methods.
 * Trace does not own attached `Print` or `Tempo` instances. Keep them alive until `Trace::end()` completes.
