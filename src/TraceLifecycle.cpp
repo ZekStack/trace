@@ -1,16 +1,34 @@
 #include "internal/TraceImpl.h"
 
+#include <limits>
+
+namespace {
+bool isValidStackSize(size_t stackBytes) {
+	return stackBytes >= trace_detail::kMinStackSizeBytes &&
+	       (stackBytes % sizeof(StackType_t)) == 0;
+}
+
+[[noreturn]] void suspendForever() {
+	vTaskSuspend(nullptr);
+	for (;;) {
+		vTaskDelay(portMAX_DELAY);
+	}
+}
+} // namespace
+
 bool TraceImpl::initBuffers() {
 	deinitBuffers();
-	if (!recentLogs.init(config.maxRecentLogs, config.storageMemory, false)) {
+	const Strata::Placement allocation = allocationPlacement();
+	const Strata::Placement realtimeAllocation = realtimeAllocationPlacement();
+	if (!recentLogs.init(config.maxRecentLogs, allocation)) {
 		deinitBuffers();
 		return false;
 	}
-	if (!realtimeLogs.init(config.maxRealtimeLogs, config.realtimeStorageMemory, true)) {
+	if (!realtimeLogs.init(config.maxRealtimeLogs, realtimeAllocation)) {
 		deinitBuffers();
 		return false;
 	}
-	if (!pendingLogs.init(config.maxPendingLogs, config.storageMemory, false)) {
+	if (!pendingLogs.init(config.maxPendingLogs, allocation)) {
 		deinitBuffers();
 		return false;
 	}
@@ -28,7 +46,7 @@ void TraceImpl::wakeTask() {
 	{
 		TraceLock lock(mutex);
 		if (lock) {
-			handle = taskHandle;
+			handle = task.handle();
 		}
 	}
 	if (handle != nullptr) {
@@ -74,19 +92,20 @@ TickType_t TraceImpl::shutdownWaitTicks() {
 	return ticks;
 }
 
-void TraceImpl::markTaskStopped() {
-	TraceLock lock(mutex);
-	if (lock) {
-		stackHighWaterMarkBytes = trace_task_support::currentStackHighWaterMarkBytes();
-		taskHandle = nullptr;
+void TraceImpl::markTaskReadyForDelete() {
+	{
+		TraceLock lock(mutex);
+		if (lock) {
+			stackHighWaterMarkBytes = task.stackHighWaterMarkBytes();
+		}
 	}
+	taskReadyForDelete.store(true, std::memory_order_release);
 }
 
 void TraceImpl::taskEntry(void *arg) {
 	TraceImpl *impl = static_cast<TraceImpl *>(arg);
 	if (impl == nullptr) {
-		vTaskDelete(nullptr);
-		return;
+		suspendForever();
 	}
 
 	while (true) {
@@ -112,13 +131,15 @@ void TraceImpl::taskEntry(void *arg) {
 		ulTaskNotifyTake(pdTRUE, impl->waitTicks());
 	}
 
-	const bool withCaps = impl->createdWithCaps;
-	impl->markTaskStopped();
-	trace_task_support::deleteCurrentTask(withCaps);
+	impl->markTaskReadyForDelete();
+	suspendForever();
 }
 
 TraceResult Trace::init(const TraceConfig &config) {
-	if (!trace_task_support::isValidStackSize(config.stackSize)) {
+	if (!_impl || !_impl->mutex) {
+		return TraceResult::failure(TraceStatus::OutOfMemory, "failed to allocate trace state");
+	}
+	if (!isValidStackSize(config.stackSize)) {
 		return TraceResult::failure(
 		    TraceStatus::InvalidArgument,
 		    "stack size must be at least 1024 bytes and aligned"
@@ -127,22 +148,15 @@ TraceResult Trace::init(const TraceConfig &config) {
 	if (config.taskName == nullptr || config.taskName[0] == '\0') {
 		return TraceResult::failure(TraceStatus::InvalidArgument, "task name is required");
 	}
-
-	bool usePsramStack = false;
-	TraceStackType actualStackType = TraceStackType::Internal;
-	if (config.stackType == TraceStackType::Psram) {
-		if (!trace_task_support::hasExternalStackSupport()) {
-			return TraceResult::failure(
-			    TraceStatus::TaskCreateFailed,
-			    "PSRAM task stacks are not available"
-			);
-		}
-		usePsramStack = true;
-		actualStackType = TraceStackType::Psram;
-	} else if (config.stackType == TraceStackType::Auto &&
-	           trace_task_support::hasExternalStackSupport()) {
-		usePsramStack = true;
-		actualStackType = TraceStackType::Psram;
+	if (!Strata::validMemoryPolicy(config.memory)) {
+		return TraceResult::failure(TraceStatus::InvalidArgument, "invalid memory policy");
+	}
+	if (config.realtimeAllocation.has_value() &&
+	    !Strata::validPlacement(*config.realtimeAllocation)) {
+		return TraceResult::failure(
+		    TraceStatus::InvalidArgument,
+		    "invalid realtime allocation placement"
+		);
 	}
 
 	{
@@ -154,10 +168,11 @@ TraceResult Trace::init(const TraceConfig &config) {
 			return TraceResult::failure(TraceStatus::AlreadyInitialized, "trace already initialized");
 		}
 		_impl->config = config;
-		_impl->actualStackType = actualStackType;
 		_impl->stopping = false;
 		_impl->flushRequested = false;
 		_impl->urgentFlushRequested = false;
+		_impl->taskReadyForDelete.store(false, std::memory_order_relaxed);
+		_impl->taskStackRegion = Strata::Region::Unknown;
 		_impl->nextSequence = 1;
 		_impl->droppedLogCount = 0;
 		_impl->realtimeLogCount = 0;
@@ -187,20 +202,18 @@ TraceResult Trace::init(const TraceConfig &config) {
 		}
 	}
 
-	TaskHandle_t handle = nullptr;
-	bool createdWithCaps = false;
-	const BaseType_t created = trace_task_support::createTask(
+	Strata::FreeRTOS::Task task = Strata::FreeRTOS::Task::create(
 	    &TraceImpl::taskEntry,
-	    config.taskName,
-	    config.stackSize,
 	    _impl.get(),
-	    config.priority,
-	    &handle,
-	    config.coreId,
-	    usePsramStack,
-	    createdWithCaps
+	    Strata::FreeRTOS::TaskConfig{
+	        .name = config.taskName,
+	        .stackBytes = config.stackSize,
+	        .stackPlacement = config.memory.taskStack,
+	        .priority = config.priority,
+	        .affinity = static_cast<std::int32_t>(config.coreId),
+	    }
 	);
-	if (created != pdPASS || handle == nullptr) {
+	if (!task) {
 		TraceLock lock(_impl->mutex);
 		if (lock) {
 			_impl->deinitBuffers();
@@ -210,17 +223,28 @@ TraceResult Trace::init(const TraceConfig &config) {
 
 	{
 		TraceLock lock(_impl->mutex);
-		if (lock) {
-			_impl->taskHandle = handle;
-			_impl->createdWithCaps = createdWithCaps;
-			_impl->initialized = true;
+		if (!lock) {
+			TaskHandle_t handle = task.handle();
+			if (handle != nullptr) {
+				vTaskSuspend(handle);
+			}
+			task.reset();
+			_impl->deinitBuffers();
+			return TraceResult::failure(TraceStatus::InternalError, "failed to lock trace");
 		}
+		_impl->taskStackRegion = task.stackRegion();
+		_impl->task = std::move(task);
+		_impl->initialized = true;
 	}
 
 	return TraceResult::success("trace initialized");
 }
 
 TraceResult Trace::end(uint32_t timeoutMs) {
+	if (!_impl) {
+		return TraceResult::success("trace is not initialized");
+	}
+
 	TaskHandle_t handle = nullptr;
 	{
 		TraceLock lock(_impl->mutex);
@@ -232,45 +256,58 @@ TraceResult Trace::end(uint32_t timeoutMs) {
 		}
 		_impl->stopping = true;
 		_impl->flushRequested = true;
-		_impl->shutdownDeadlineMs = millis() + timeoutMs;
+		_impl->shutdownDeadlineMs =
+		    timeoutMs == UINT32_MAX ? 0 : static_cast<uint64_t>(millis()) + timeoutMs;
 		_impl->shutdownTimedOut = false;
 		_impl->shutdownFlushFailed = false;
-		handle = _impl->taskHandle;
+		handle = _impl->task.handle();
 	}
 	if (handle != nullptr) {
 		xTaskNotifyGive(handle);
 	}
 
 	const uint32_t startedMs = millis();
-	while (true) {
-		{
-			TraceLock lock(_impl->mutex);
-			if (lock && _impl->taskHandle == nullptr) {
-				const bool timedOut = _impl->shutdownTimedOut;
-				const bool flushFailed = _impl->shutdownFlushFailed;
-				_impl->initialized = false;
-				_impl->stopping = false;
-				_impl->shutdownDeadlineMs = 0;
-				_impl->deinitBuffers();
-				if (timedOut) {
-					return TraceResult::failure(TraceStatus::Timeout, "trace end timed out");
-				}
-				if (flushFailed) {
-					return TraceResult::failure(TraceStatus::FlushFailed, "trace end flush failed");
-				}
-				return TraceResult::success("trace ended");
-			}
-		}
-		const uint32_t elapsedMs = millis() - startedMs;
-		if (elapsedMs >= timeoutMs) {
-			TraceLock lock(_impl->mutex);
-			if (lock) {
-				_impl->shutdownTimedOut = true;
-			}
-			if (elapsedMs >= timeoutMs + (trace_detail::kWaitPollMs * 4)) {
-				return TraceResult::failure(TraceStatus::Timeout, "trace end timed out");
-			}
+	while (!_impl->taskReadyForDelete.load(std::memory_order_acquire)) {
+		if (timeoutMs != UINT32_MAX && static_cast<uint32_t>(millis() - startedMs) >= timeoutMs) {
+			return TraceResult::failure(TraceStatus::Timeout, "trace end timed out");
 		}
 		vTaskDelay(pdMS_TO_TICKS(trace_detail::kWaitPollMs));
 	}
+
+	bool timedOut = false;
+	bool flushFailed = false;
+	{
+		TraceLock lock(_impl->mutex);
+		if (!lock) {
+			return TraceResult::failure(TraceStatus::InternalError, "failed to lock trace");
+		}
+		timedOut = _impl->shutdownTimedOut;
+		flushFailed = _impl->shutdownFlushFailed;
+		handle = _impl->task.handle();
+	}
+
+	if (handle != nullptr) {
+		vTaskSuspend(handle);
+	}
+	_impl->task.reset();
+
+	{
+		TraceLock lock(_impl->mutex);
+		if (!lock) {
+			return TraceResult::failure(TraceStatus::InternalError, "failed to lock trace");
+		}
+		_impl->initialized = false;
+		_impl->stopping = false;
+		_impl->shutdownDeadlineMs = 0;
+		_impl->taskReadyForDelete.store(false, std::memory_order_relaxed);
+		_impl->deinitBuffers();
+	}
+
+	if (timedOut) {
+		return TraceResult::failure(TraceStatus::Timeout, "trace end timed out");
+	}
+	if (flushFailed) {
+		return TraceResult::failure(TraceStatus::FlushFailed, "trace end flush failed");
+	}
+	return TraceResult::success("trace ended");
 }

@@ -2,14 +2,13 @@
 
 #include "../Trace.h"
 
-#include <Arduino.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <new>
+#include <limits>
+#include <memory>
 #include <type_traits>
-
-#include "esp_heap_caps.h"
+#include <utility>
 
 struct TraceRecord {
 	uint64_t sequence = 0;
@@ -22,75 +21,6 @@ struct TraceRecord {
 	char message[TRACE_RECORD_MAX_MESSAGE_LENGTH + 1] = {};
 };
 
-namespace trace_storage {
-#if defined(MALLOC_CAP_INTERNAL)
-inline constexpr int kInternalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-#else
-inline constexpr int kInternalCaps = MALLOC_CAP_8BIT;
-#endif
-
-#if defined(MALLOC_CAP_SPIRAM)
-inline constexpr int kPsramCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-#else
-inline constexpr int kPsramCaps = MALLOC_CAP_8BIT;
-#endif
-
-struct AllocationInfo {
-	size_t bytes = 0;
-	bool psram = false;
-};
-
-inline bool psramAvailable() {
-#if defined(MALLOC_CAP_SPIRAM)
-	return heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0;
-#else
-	return false;
-#endif
-}
-
-inline void *allocate(
-    size_t bytes,
-    TraceStorageMemory memory,
-    bool,
-    AllocationInfo &info
-) {
-	info = AllocationInfo();
-	if (bytes == 0) {
-		return nullptr;
-	}
-
-	void *ptr = nullptr;
-	if (memory != TraceStorageMemory::Internal) {
-#if defined(MALLOC_CAP_SPIRAM)
-		if (psramAvailable()) {
-			ptr = heap_caps_malloc(bytes, kPsramCaps);
-			if (ptr != nullptr) {
-				info.bytes = bytes;
-				info.psram = true;
-				return ptr;
-			}
-		}
-#endif
-		if (memory == TraceStorageMemory::RequirePsram) {
-			return nullptr;
-		}
-	}
-
-	ptr = heap_caps_malloc(bytes, kInternalCaps);
-	if (ptr != nullptr) {
-		info.bytes = bytes;
-		info.psram = false;
-	}
-	return ptr;
-}
-
-inline void deallocate(void *ptr) {
-	if (ptr != nullptr) {
-		heap_caps_free(ptr);
-	}
-}
-} // namespace trace_storage
-
 template <typename T>
 class TraceRingBuffer {
   public:
@@ -102,25 +32,28 @@ class TraceRingBuffer {
 	TraceRingBuffer(const TraceRingBuffer &) = delete;
 	TraceRingBuffer &operator=(const TraceRingBuffer &) = delete;
 
-	bool init(size_t capacity, TraceStorageMemory memoryType, bool realtime) {
-		static_assert(std::is_trivially_copyable<T>::value, "TraceRingBuffer requires trivial items");
+	bool init(size_t capacity, Strata::Placement placement) {
+		static_assert(std::is_trivially_copyable_v<T>, "TraceRingBuffer requires trivial items");
 		static_assert(
-		    std::is_trivially_destructible<T>::value,
+		    std::is_trivially_destructible_v<T>,
 		    "TraceRingBuffer requires trivially destructible items"
 		);
 		deinit();
 		if (capacity == 0) {
 			return true;
 		}
-		const size_t bytes = sizeof(T) * capacity;
-		trace_storage::AllocationInfo allocation;
-		void *items = trace_storage::allocate(bytes, memoryType, realtime, allocation);
-		if (items == nullptr) {
+		if (capacity > std::numeric_limits<size_t>::max() / sizeof(T)) {
 			return false;
 		}
-		items_ = static_cast<T *>(items);
+
+		Strata::Buffer storage(sizeof(T) * capacity, placement);
+		if (storage.data() == nullptr) {
+			return false;
+		}
+
+		storage_ = std::move(storage);
+		items_ = storage_.data<T>();
 		capacity_ = capacity;
-		allocation_ = allocation;
 		clearStorage();
 		return true;
 	}
@@ -128,15 +61,14 @@ class TraceRingBuffer {
 	void deinit() {
 		if (items_ != nullptr) {
 			for (size_t i = 0; i < capacity_; ++i) {
-				items_[i].~T();
+				std::destroy_at(&items_[i]);
 			}
 		}
-		trace_storage::deallocate(items_);
+		storage_.reset();
 		items_ = nullptr;
 		capacity_ = 0;
 		head_ = 0;
 		count_ = 0;
-		allocation_ = trace_storage::AllocationInfo();
 	}
 
 	bool pushDropOldest(const T &item) {
@@ -203,11 +135,15 @@ class TraceRingBuffer {
 	}
 
 	size_t allocatedBytes() const {
-		return allocation_.bytes;
+		return storage_.size();
 	}
 
-	bool usingPsram() const {
-		return allocation_.psram;
+	Strata::Placement placement() const {
+		return storage_.placement();
+	}
+
+	Strata::Region region() const {
+		return storage_.region();
 	}
 
   private:
@@ -215,15 +151,15 @@ class TraceRingBuffer {
 		return (head_ + logicalIndex) % capacity_;
 	}
 
+	Strata::Buffer storage_;
 	T *items_ = nullptr;
 	size_t capacity_ = 0;
 	size_t head_ = 0;
 	size_t count_ = 0;
-	trace_storage::AllocationInfo allocation_;
 
 	void clearStorage() {
 		for (size_t i = 0; i < capacity_; ++i) {
-			::new (static_cast<void *>(&items_[i])) T();
+			std::construct_at(&items_[i]);
 		}
 	}
 };

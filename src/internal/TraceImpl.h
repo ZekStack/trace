@@ -3,15 +3,17 @@
 #include "../Trace.h"
 #include "TraceMutex.h"
 #include "TraceStorage.h"
-#include "TraceTaskSupport.h"
 
+#include <atomic>
+#include <memory>
 #include <stdarg.h>
-#include <string>
-#include <vector>
+
+#include <strata/freertos/Task.h>
 
 namespace trace_detail {
 inline constexpr uint32_t kWaitPollMs = 10;
 inline constexpr size_t kTimeBufferSize = TRACE_TIME_TEXT_BUFFER_LENGTH;
+inline constexpr size_t kMinStackSizeBytes = 1024;
 
 bool levelEnabled(TraceLevel level, TraceLevel minLevel);
 bool isErrorLevel(TraceLevel level);
@@ -19,23 +21,26 @@ size_t effectiveLimit(size_t limit, size_t maximum);
 } // namespace trace_detail
 
 struct TraceImpl {
+	TraceImpl() noexcept : mutex(Strata::FreeRTOS::RecursiveMutex::create()) {
+	}
+
 	TraceConfig config{};
 	TraceTempoConfig tempoConfig{};
-	TraceMutex mutex;
+	Strata::FreeRTOS::RecursiveMutex mutex;
 	TraceRingBuffer<TraceRecord> recentLogs;
 	TraceRingBuffer<TraceRecord> realtimeLogs;
 	TraceRingBuffer<TraceRecord> pendingLogs;
-	TraceFlushCallback onFlush;
-	TraceLogCallback onLog;
+	std::shared_ptr<TraceFlushCallback> onFlush;
+	std::shared_ptr<TraceLogCallback> onLog;
 	Print *stream = nullptr;
 	Tempo *tempo = nullptr;
 	bool initialized = false;
 	bool stopping = false;
 	bool flushRequested = false;
 	bool urgentFlushRequested = false;
-	TaskHandle_t taskHandle = nullptr;
-	bool createdWithCaps = false;
-	TraceStackType actualStackType = TraceStackType::Internal;
+	Strata::FreeRTOS::Task task;
+	std::atomic<bool> taskReadyForDelete{false};
+	Strata::Region taskStackRegion = Strata::Region::Unknown;
 	uint64_t nextSequence = 1;
 	uint32_t droppedLogCount = 0;
 	uint32_t realtimeLogCount = 0;
@@ -58,6 +63,14 @@ struct TraceImpl {
 	bool shutdownTimedOut = false;
 	bool shutdownFlushFailed = false;
 
+	Strata::Placement allocationPlacement() const {
+		return config.memory.allocation;
+	}
+
+	Strata::Placement realtimeAllocationPlacement() const {
+		return config.realtimeAllocation.value_or(config.memory.allocation);
+	}
+
 	bool initBuffers();
 	void deinitBuffers();
 	void wakeTask();
@@ -68,7 +81,7 @@ struct TraceImpl {
 	uint32_t retryIntervalMsLocked() const;
 	TraceResult appendLog(TraceRecord record);
 
-	TraceLog toPublicLog(const TraceRecord &record);
+	TraceLog toPublicLog(const TraceRecord &record, Strata::Placement placement);
 	void formatLog(TraceLog &log);
 	bool formatTempoTime(
 	    const Tempo &tempoRef,
@@ -85,7 +98,7 @@ struct TraceImpl {
 	bool isStopping();
 	bool shouldStopForShutdown();
 	TickType_t shutdownWaitTicks();
-	void markTaskStopped();
+	void markTaskReadyForDelete();
 	static void taskEntry(void *arg);
 
 	static const char *levelName(TraceLevel level);

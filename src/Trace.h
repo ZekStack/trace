@@ -2,13 +2,13 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <Strata.h>
 #include <algorithm>
 #include <functional>
-#include <memory>
+#include <optional>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string>
-#include <vector>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -53,18 +53,6 @@ enum class TraceLevel : uint8_t {
 	Fatal = 4,
 };
 
-enum class TraceStackType : uint8_t {
-	Auto,
-	Internal,
-	Psram,
-};
-
-enum class TraceStorageMemory : uint8_t {
-	Internal,
-	PreferPsram,
-	RequirePsram,
-};
-
 enum class TraceOverflowPolicy : uint8_t {
 	DropOldestPending,
 	DropNewest,
@@ -96,7 +84,7 @@ enum class TraceFlushResult : uint8_t {
 struct TraceResult {
 	bool result = false;
 	TraceStatus status = TraceStatus::InternalError;
-	std::string message;
+	const char *message = "error";
 
 	explicit operator bool() const {
 		return result;
@@ -107,12 +95,14 @@ struct TraceResult {
 };
 
 struct TraceConfig {
+	Strata::MemoryPolicy memory{
+	    .allocation = Strata::Placement::PreferExternal,
+	    .taskStack = Strata::Placement::PreferExternal,
+	};
+	std::optional<Strata::Placement> realtimeAllocation{};
 	uint32_t stackSize = 4096;
 	UBaseType_t priority = 1;
 	BaseType_t coreId = tskNO_AFFINITY;
-	TraceStackType stackType = TraceStackType::Auto;
-	TraceStorageMemory storageMemory = TraceStorageMemory::Internal;
-	TraceStorageMemory realtimeStorageMemory = TraceStorageMemory::Internal;
 	size_t maxRecentLogs = 100;
 	size_t maxRealtimeLogs = 100;
 	size_t maxPendingLogs = 50;
@@ -133,18 +123,31 @@ struct TraceConfig {
 };
 
 struct TraceLog {
+	explicit TraceLog(Strata::Placement placement = Strata::Placement::PreferExternal)
+	    : tag(Strata::Allocator<char>{placement}),
+	      message(Strata::Allocator<char>{placement}),
+	      formatted(Strata::Allocator<char>{placement}),
+	      timeText(Strata::Allocator<char>{placement}) {
+	}
+
 	uint64_t sequence = 0;
 	TraceLevel level = TraceLevel::Info;
-	std::string tag;
-	std::string message;
-	std::string formatted;
-	std::string timeText;
+	Strata::String tag;
+	Strata::String message;
+	Strata::String formatted;
+	Strata::String timeText;
 	uint64_t uptimeMs = 0;
 	bool truncated = false;
 };
 
+using TraceLogList = Strata::Vector<TraceLog>;
+
 struct TraceLogBatch {
-	std::vector<TraceLog> logs;
+	explicit TraceLogBatch(Strata::Placement placement = Strata::Placement::PreferExternal)
+	    : logs(Strata::Allocator<TraceLog>{placement}) {
+	}
+
+	TraceLogList logs;
 	uint64_t createdAtUptimeMs = 0;
 
 	size_t size() const {
@@ -169,14 +172,16 @@ struct TraceDiag {
 	uint64_t lastFlushAtMs = 0;
 	uint64_t lastLogAtMs = 0;
 	size_t stackHighWaterMarkBytes = 0;
-	TraceStackType requestedStackType = TraceStackType::Auto;
-	TraceStackType actualStackType = TraceStackType::Internal;
+	Strata::Placement requestedAllocationPlacement = Strata::Placement::PreferExternal;
+	Strata::Placement requestedRealtimeAllocationPlacement = Strata::Placement::PreferExternal;
+	Strata::Placement requestedTaskStackPlacement = Strata::Placement::PreferExternal;
+	Strata::Region taskStackRegion = Strata::Region::Unknown;
 	size_t recentAllocatedBytes = 0;
 	size_t realtimeAllocatedBytes = 0;
 	size_t pendingAllocatedBytes = 0;
-	bool recentLogsInPsram = false;
-	bool realtimeLogsInPsram = false;
-	bool pendingLogsInPsram = false;
+	Strata::Region recentStorageRegion = Strata::Region::Unknown;
+	Strata::Region realtimeStorageRegion = Strata::Region::Unknown;
+	Strata::Region pendingStorageRegion = Strata::Region::Unknown;
 };
 
 using TraceTimeFormatter = bool (*)(const Tempo &tempo, char *buffer, size_t bufferSize);
@@ -262,10 +267,10 @@ class Trace {
 
 	TraceDiag getDiagnostics();
 	TraceLog getLastLog();
-	std::vector<TraceLog> getLogs();
-	std::vector<TraceLog> getLogs(TraceLevel level);
-	std::vector<TraceLog> getLastLogs(size_t count);
-	std::vector<TraceLog> getLogsByTag(const char *tag);
+	TraceLogList getLogs();
+	TraceLogList getLogs(TraceLevel level);
+	TraceLogList getLastLogs(size_t count);
+	TraceLogList getLogsByTag(const char *tag);
 
 	const char *statusToString(TraceStatus status) const;
 	const char *levelToString(TraceLevel level) const;
@@ -318,5 +323,5 @@ class Trace {
 	    const std::string &message,
 	    bool messageTruncated
 	);
-	std::unique_ptr<TraceImpl> _impl;
+	Strata::UniquePtr<TraceImpl> _impl;
 };

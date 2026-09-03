@@ -2,8 +2,6 @@
 
 #include "internal/TraceImpl.h"
 
-#include <memory>
-
 TraceResult TraceResult::success(const char *message) {
 	TraceResult result;
 	result.result = true;
@@ -20,11 +18,14 @@ TraceResult TraceResult::failure(TraceStatus status, const char *message) {
 	return result;
 }
 
-Trace::Trace() : _impl(std::make_unique<TraceImpl>()) {
+Trace::Trace()
+    : _impl(Strata::makeUnique<TraceImpl>(Strata::Placement::PreferExternal)) {
 }
 
 Trace::~Trace() {
-	end(2000);
+	if (_impl) {
+		(void)end(UINT32_MAX);
+	}
 }
 
 const char *Trace::statusToString(TraceStatus status) const {
