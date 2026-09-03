@@ -2,7 +2,7 @@
 
 #include "FreeRTOS.h"
 
-#include <new>
+#include <memory>
 
 using SemaphoreHandle_t = std::recursive_mutex *;
 
