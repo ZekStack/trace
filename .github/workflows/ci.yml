@@ -19,7 +19,7 @@ env:
 
 jobs:
   source-audit:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,7 +57,7 @@ jobs:
           fi
 
   host-behavior-tests:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     needs: source-audit
     steps:
       - name: Checkout
@@ -93,7 +93,7 @@ jobs:
           /tmp/trace-behavior-regression-tests
 
   build-examples:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     needs: [source-audit, host-behavior-tests]
     strategy:
       fail-fast: false
@@ -155,7 +155,7 @@ jobs:
             --project-option "build_flags=-std=gnu++20"
 
   arduino-cli:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     needs: [source-audit, host-behavior-tests]
     strategy:
       fail-fast: false
@@ -239,7 +239,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [source-audit, host-behavior-tests, build-examples, arduino-cli]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     permissions:
       contents: write
     steps:
