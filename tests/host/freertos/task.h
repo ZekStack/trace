@@ -10,6 +10,7 @@
 #include <thread>
 
 extern std::atomic<uint64_t> trace_host_millis;
+extern std::atomic<int> trace_host_active_tasks;
 
 using TaskFunction_t = void (*)(void *);
 
@@ -47,6 +48,7 @@ inline TaskHandle_t xTaskCreateStatic(
 		return nullptr;
 	}
 	auto *control = new trace_host::TaskControl();
+	trace_host_active_tasks.fetch_add(1, std::memory_order_relaxed);
 	control->thread = std::thread([entry, arg, control]() {
 		trace_host::currentTask = control;
 		try {
@@ -130,6 +132,7 @@ inline void vTaskDelete(TaskHandle_t handle) {
 		handle->thread.join();
 	}
 	delete handle;
+	trace_host_active_tasks.fetch_sub(1, std::memory_order_relaxed);
 }
 
 inline TaskHandle_t xTaskGetCurrentTaskHandle() {
