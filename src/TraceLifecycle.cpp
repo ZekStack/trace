@@ -262,6 +262,7 @@ TraceResult Trace::end(uint32_t timeoutMs) {
 	}
 
 	TaskHandle_t handle = nullptr;
+	bool continuingShutdown = false;
 	{
 		TraceLock lock(_impl->mutex);
 		if (!lock) {
@@ -270,7 +271,8 @@ TraceResult Trace::end(uint32_t timeoutMs) {
 		if (!_impl->initialized) {
 			return TraceResult::success("trace is not initialized");
 		}
-		if (!_impl->stopping) {
+		continuingShutdown = _impl->stopping;
+		if (!continuingShutdown) {
 			_impl->stopping = true;
 			_impl->flushRequested = true;
 			_impl->shutdownDeadlineMs =
@@ -321,11 +323,14 @@ TraceResult Trace::end(uint32_t timeoutMs) {
 		_impl->deinitBuffers();
 	}
 
-	if (timedOut) {
-		return TraceResult::failure(TraceStatus::Timeout, "trace end timed out");
-	}
 	if (flushFailed) {
 		return TraceResult::failure(TraceStatus::FlushFailed, "trace end flush failed");
+	}
+	if (timedOut && !continuingShutdown) {
+		return TraceResult::failure(TraceStatus::Timeout, "trace end timed out");
+	}
+	if (timedOut) {
+		return TraceResult::success("trace ended after prior timeout");
 	}
 	return TraceResult::success("trace ended");
 }
