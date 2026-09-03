@@ -2,10 +2,10 @@
 
 #include "FreeRTOS.h"
 
-#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <mutex>
 #include <thread>
 
@@ -14,10 +14,14 @@ extern std::atomic<uint64_t> trace_host_millis;
 using TaskFunction_t = void (*)(void *);
 
 namespace trace_host {
+struct TaskDeleted final : std::exception {};
+
 struct TaskControl {
 	std::mutex mutex;
 	std::condition_variable condition;
 	uint32_t notifications = 0;
+	bool deleted = false;
+	std::thread thread;
 };
 
 inline thread_local TaskControl *currentTask = nullptr;
@@ -25,41 +29,33 @@ inline thread_local TaskControl *currentTask = nullptr;
 
 using TaskHandle_t = trace_host::TaskControl *;
 
-inline BaseType_t xTaskCreate(
+inline TaskHandle_t xTaskCreateStatic(
     TaskFunction_t entry,
     const char *name,
-    uint32_t stackDepth,
+    configSTACK_DEPTH_TYPE stackDepth,
     void *arg,
     UBaseType_t priority,
-    TaskHandle_t *handle
+    StackType_t *stackBuffer,
+    StaticTask_t *taskBuffer
 ) {
 	(void)name;
 	(void)stackDepth;
 	(void)priority;
-	if (entry == nullptr || handle == nullptr) {
-		return pdFAIL;
+	(void)stackBuffer;
+	(void)taskBuffer;
+	if (entry == nullptr) {
+		return nullptr;
 	}
 	auto *control = new trace_host::TaskControl();
-	*handle = control;
-	std::thread([entry, arg, control]() {
+	control->thread = std::thread([entry, arg, control]() {
 		trace_host::currentTask = control;
-		entry(arg);
+		try {
+			entry(arg);
+		} catch (const trace_host::TaskDeleted &) {
+		}
 		trace_host::currentTask = nullptr;
-	}).detach();
-	return pdPASS;
-}
-
-inline BaseType_t xTaskCreatePinnedToCore(
-    TaskFunction_t entry,
-    const char *name,
-    uint32_t stackDepth,
-    void *arg,
-    UBaseType_t priority,
-    TaskHandle_t *handle,
-    BaseType_t coreId
-) {
-	(void)coreId;
-	return xTaskCreate(entry, name, stackDepth, arg, priority, handle);
+	});
+	return control;
 }
 
 inline void xTaskNotifyGive(TaskHandle_t handle) {
@@ -79,15 +75,20 @@ inline uint32_t ulTaskNotifyTake(BaseType_t clearOnExit, TickType_t ticksToWait)
 		return 0;
 	}
 	std::unique_lock<std::mutex> lock(control->mutex);
-	if (control->notifications == 0) {
+	if (control->notifications == 0 && !control->deleted) {
 		if (ticksToWait == portMAX_DELAY) {
-			control->condition.wait(lock, [control]() { return control->notifications > 0; });
+			control->condition.wait(lock, [control]() {
+				return control->notifications > 0 || control->deleted;
+			});
 		} else if (ticksToWait > 0) {
 			lock.unlock();
 			trace_host_millis.fetch_add(ticksToWait);
 			std::this_thread::yield();
 			lock.lock();
 		}
+	}
+	if (control->deleted) {
+		throw trace_host::TaskDeleted();
 	}
 	const uint32_t value = control->notifications;
 	if (clearOnExit == pdTRUE) {
@@ -103,8 +104,32 @@ inline void vTaskDelay(TickType_t ticks) {
 	std::this_thread::yield();
 }
 
+inline void vTaskSuspend(TaskHandle_t handle) {
+	if (handle != nullptr) {
+		return;
+	}
+	auto *control = trace_host::currentTask;
+	if (control == nullptr) {
+		return;
+	}
+	std::unique_lock<std::mutex> lock(control->mutex);
+	control->condition.wait(lock, [control]() { return control->deleted; });
+	throw trace_host::TaskDeleted();
+}
+
 inline void vTaskDelete(TaskHandle_t handle) {
-	(void)handle;
+	if (handle == nullptr) {
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(handle->mutex);
+		handle->deleted = true;
+	}
+	handle->condition.notify_all();
+	if (handle->thread.joinable()) {
+		handle->thread.join();
+	}
+	delete handle;
 }
 
 inline TaskHandle_t xTaskGetCurrentTaskHandle() {
@@ -113,5 +138,5 @@ inline TaskHandle_t xTaskGetCurrentTaskHandle() {
 
 inline UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t handle) {
 	(void)handle;
-	return 4096;
+	return 1024;
 }

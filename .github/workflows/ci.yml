@@ -15,6 +15,7 @@ env:
   PIOARDUINO_PLATFORM_URL: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.39/platform-espressif32.zip
   PIOARDUINO_PLATFORM_VERSION: 55.03.39
   PIOARDUINO_VERSION: 6.1.19
+  STRATA_VERSION: v0.1.2
 
 jobs:
   source-audit:
@@ -25,6 +26,7 @@ jobs:
 
       - name: Audit production sources
         run: |
+          set -e
           if grep -RInE '(^|[^[:alnum:]_])throw([^[:alnum:]_]|$)|std::abort[[:space:]]*\(' src; then
             echo "Embedded safety audit failed"
             exit 1
@@ -37,6 +39,22 @@ jobs:
             echo "Trace internals must not use Arduino String"
             exit 1
           fi
+          if grep -RInE 'heap_caps_|MALLOC_CAP_|esp_heap_caps|ps_malloc[[:space:]]*\(' src; then
+            echo "Trace allocation must go through Strata"
+            exit 1
+          fi
+          if grep -RInE '(^|[^[:alnum:]_:])(malloc|calloc|realloc|free)[[:space:]]*\(|std::make_(unique|shared)[[:space:]]*<|(^|[^[:alnum:]_:])new[[:space:]]|(^|[^[:alnum:]_:])delete[[:space:]]' src; then
+            echo "Trace owned allocations must go through Strata"
+            exit 1
+          fi
+          if grep -RInE 'xTaskCreate(PinnedToCore|PinnedToCoreWithCaps)?[[:space:]]*\(|vTaskDelete[[:space:]]*\(|xSemaphoreCreate[A-Za-z]*[[:space:]]*\(' src; then
+            echo "Trace FreeRTOS ownership must go through Strata"
+            exit 1
+          fi
+          if grep -RInE 'std::vector[[:space:]]*<' src; then
+            echo "Trace owned vectors must use Strata::Vector"
+            exit 1
+          fi
 
   host-behavior-tests:
     runs-on: ubuntu-latest
@@ -45,11 +63,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Fetch Strata
+        run: git clone --depth 1 --branch "${STRATA_VERSION}" https://github.com/ZekStack/strata.git "${RUNNER_TEMP}/strata"
+
       - name: Build host behavior tests
         run: |
           g++ -std=c++20 -Wall -Wextra \
-            -Itests/host -Isrc \
-            src/*.cpp tests/host/trace_host_tests.cpp \
+            -Itests/host -Isrc -I"${RUNNER_TEMP}/strata/src" \
+            src/*.cpp \
+            "${RUNNER_TEMP}/strata/src/strata/Allocation.cpp" \
+            "${RUNNER_TEMP}/strata/src/strata/Diagnostics.cpp" \
+            "${RUNNER_TEMP}/strata/src/strata/internal/PlatformGeneric.cpp" \
+            tests/host/trace_host_tests.cpp \
             -pthread \
             -o /tmp/trace-host-tests
 
@@ -88,6 +113,9 @@ jobs:
       - name: Install PIOArduino ESP32 Platform
         run: pio pkg install -g -p "${PIOARDUINO_PLATFORM_URL}"
 
+      - name: Fetch Strata
+        run: git clone --depth 1 --branch "${STRATA_VERSION}" https://github.com/ZekStack/strata.git "${RUNNER_TEMP}/strata"
+
       - name: Build library examples
         run: |
           set -e
@@ -97,6 +125,7 @@ jobs:
               pio ci "$d" \
                 --board ${{ matrix.board }} \
                 --lib="." \
+                --lib="${RUNNER_TEMP}/strata" \
                 --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
                 --project-option "build_unflags=-std=gnu++11" \
                 --project-option "build_flags=-std=gnu++20"
@@ -108,6 +137,7 @@ jobs:
           pio ci examples/TempoTimestamps \
             --board ${{ matrix.board }} \
             --lib="." \
+            --lib="${RUNNER_TEMP}/strata" \
             --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
             --project-option "lib_deps=https://github.com/ZekStack/tempo.git" \
             --project-option "build_unflags=-std=gnu++11" \
@@ -157,12 +187,13 @@ jobs:
           arduino-cli lib update-index
           arduino-cli lib install "ArduinoJson"
 
-      - name: Add local library to sketchbook
+      - name: Add local libraries to sketchbook
         run: |
           set -e
           SKETCHBOOK_DIR="${HOME}/Arduino"
           mkdir -p "$SKETCHBOOK_DIR/libraries/Trace"
           rsync -a --delete --exclude ".git" ./ "$SKETCHBOOK_DIR/libraries/Trace/"
+          git clone --depth 1 --branch "${STRATA_VERSION}" https://github.com/ZekStack/strata.git "$SKETCHBOOK_DIR/libraries/Strata"
 
       - name: Build examples (${{ matrix.board.name }})
         env:

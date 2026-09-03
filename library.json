@@ -1,13 +1,14 @@
 {
   "name": "Trace",
-  "version": "0.2.1",
-  "description": "Logging and diagnostics library for ESP32 devices with bounded buffers and task-side flushing.",
+  "version": "0.3.0",
+  "description": "Logging and diagnostics library for ESP32 devices with Strata-backed bounded buffers and task-side flushing.",
   "keywords": [
     "esp32",
     "logging",
     "diagnostics",
     "arduinojson",
-    "freertos"
+    "freertos",
+    "strata"
   ],
   "repository": {
     "type": "git",
@@ -23,7 +24,8 @@
   "frameworks": "arduino",
   "platforms": "espressif32",
   "dependencies": {
-    "bblanchon/ArduinoJson": ">=7.0.0"
+    "bblanchon/ArduinoJson": ">=7.0.0",
+    "Strata": "https://github.com/ZekStack/strata.git#v0.1.2"
   },
   "build": {
     "srcDir": "src",
