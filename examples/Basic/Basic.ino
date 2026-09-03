@@ -11,7 +11,7 @@ void setup() {
 
 	TraceResult result = trace.init();
 	if (!result) {
-		Serial.println(result.message.c_str());
+		Serial.println(result.message);
 		return;
 	}
 

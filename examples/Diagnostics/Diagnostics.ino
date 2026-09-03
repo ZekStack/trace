@@ -10,6 +10,13 @@ void printDiagnostics() {
 	Serial.printf("dropped=%u\n", static_cast<unsigned>(diag.droppedLogCount));
 	Serial.printf("flushOk=%u\n", static_cast<unsigned>(diag.flushSuccessCount));
 	Serial.printf("flushFail=%u\n", static_cast<unsigned>(diag.flushFailCount));
+	Serial.printf("allocation=%s\n", Strata::toString(diag.requestedAllocationPlacement));
+	Serial.printf("realtime=%s\n", Strata::toString(diag.requestedRealtimeAllocationPlacement));
+	Serial.printf("taskStack=%s\n", Strata::toString(diag.requestedTaskStackPlacement));
+	Serial.printf("taskRegion=%s\n", Strata::toString(diag.taskStackRegion));
+	Serial.printf("recentRegion=%s\n", Strata::toString(diag.recentStorageRegion));
+	Serial.printf("realtimeRegion=%s\n", Strata::toString(diag.realtimeStorageRegion));
+	Serial.printf("pendingRegion=%s\n", Strata::toString(diag.pendingStorageRegion));
 }
 
 void setup() {
@@ -31,7 +38,7 @@ void setup() {
 	TraceLog last = trace.getLastLog();
 	Serial.println(last.formatted.c_str());
 
-	std::vector<TraceLog> appLogs = trace.getLogsByTag("APP");
+	TraceLogList appLogs = trace.getLogsByTag("APP");
 	Serial.printf("APP logs=%u\n", static_cast<unsigned>(appLogs.size()));
 
 	printDiagnostics();

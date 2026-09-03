@@ -2,7 +2,7 @@
 
 Trace is a logging and diagnostics library for ESP32.
 
-Trace helps you collect structured runtime logs in Arduino ESP32 projects with bounded RAM history, bounded realtime delivery, bounded pending flush storage, task-side persistence callbacks, optional Tempo timestamps, and diagnostics. It is designed for products that need predictable logging behavior without relying on ESP-IDF or Arduino logging macros.
+Trace collects structured runtime logs with bounded recent history, bounded realtime delivery, bounded pending flush storage, task-side persistence callbacks, optional Tempo timestamps, and runtime diagnostics. Trace v0.3.0 uses [Strata](https://github.com/ZekStack/strata) for all movable library-owned memory and FreeRTOS storage.
 
 [![CI](https://github.com/ZekStack/trace/actions/workflows/ci.yml/badge.svg)](https://github.com/ZekStack/trace/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ZekStack/trace?sort=semver)](https://github.com/ZekStack/trace/releases)
@@ -10,13 +10,20 @@ Trace helps you collect structured runtime logs in Arduino ESP32 projects with b
 
 ## Why use Trace?
 
-* **Bounded memory** - recent history, realtime delivery, pending flush logs, and payload lengths use fixed-capacity storage.
+* **Bounded storage** - recent history, realtime delivery, pending flush logs, and payload lengths use fixed-capacity storage.
+* **PSRAM-first defaults** - movable Trace-owned allocations and the Trace task stack prefer external memory by default and fall back to internal memory when needed.
+* **Shared ZekStack memory policy** - allocation and task placement use `Strata::MemoryPolicy`, `Strata::Placement`, and `Strata::Region`.
 * **Structured output** - log records keep level, tag, message, formatted text, sequence, and uptime.
 * **Task-side callbacks** - realtime observation and persistence callbacks run from the internal Trace task.
-* **ESP32 task control** - configure byte stack size, priority, core affinity, and stack memory preference.
-* **Production-minded** - result-based errors, diagnostics, thread-safe internals, ArduinoJson support, and no exceptions.
+* **Production-minded** - result-based errors, diagnostics, thread-safe internals, ArduinoJson support, and no exceptions in Trace production sources.
 
-## Install
+## Dependencies
+
+Trace v0.3.0 requires:
+
+* ArduinoJson v7 or newer.
+* Strata v0.1.2.
+* C++20.
 
 ### PlatformIO
 
@@ -27,7 +34,8 @@ board = esp32dev
 framework = arduino
 
 lib_deps =
-  https://github.com/ZekStack/trace.git
+  https://github.com/ZekStack/trace.git#v0.3.0
+  https://github.com/ZekStack/strata.git#v0.1.2
   bblanchon/ArduinoJson@>=7.0.0
 
 build_flags =
@@ -38,12 +46,11 @@ build_unflags =
 
 ### Arduino IDE
 
-Trace is not published to Arduino Library Manager yet.
-
-Install it by downloading the repository ZIP or cloning it into your Arduino libraries folder.
+Trace and Strata are not published to Arduino Library Manager yet. Install both repositories into your Arduino libraries folder and install ArduinoJson through Library Manager.
 
 ```txt
 Arduino/libraries/Trace
+Arduino/libraries/Strata
 ```
 
 ## Quick start
@@ -60,7 +67,7 @@ void setup() {
 
 	TraceResult result = trace.init();
 	if (!result) {
-		Serial.println(result.message.c_str());
+		Serial.println(result.message);
 		return;
 	}
 
@@ -72,58 +79,77 @@ void loop() {
 }
 ```
 
+With the default configuration, all movable Trace-owned memory prefers PSRAM:
+
+```cpp
+TraceConfig config;
+
+// These are already the defaults.
+config.memory.allocation = Strata::Placement::PreferExternal;
+config.memory.taskStack = Strata::Placement::PreferExternal;
+
+// nullopt means: inherit memory.allocation.
+config.realtimeAllocation = std::nullopt;
+```
+
+`PreferExternal` is deliberately different from `RequireExternal`: devices without usable PSRAM still work by falling back to internal memory.
+
+If realtime conversion must stay internal while history, pending storage, flush batches, and the task stack prefer PSRAM:
+
+```cpp
+TraceConfig config;
+config.realtimeAllocation = Strata::Placement::Internal;
+trace.init(config);
+```
+
+## Memory model
+
+`TraceConfig::memory.allocation` controls movable general Trace-owned allocations, including recent and pending ring storage, public query values, flush batches, formatted strings, and general callback ownership.
+
+`TraceConfig::memory.taskStack` controls the Trace worker task stack.
+
+`TraceConfig::realtimeAllocation` optionally overrides the general allocation placement for realtime queue storage, realtime callback ownership, and realtime `TraceLog` conversion. When it is `std::nullopt`, realtime memory inherits `memory.allocation`.
+
+Strata keeps RTOS control structures internal where required by the platform. Trace does not override those safety constraints.
+
+Diagnostics report both what was requested and where memory actually landed:
+
+```cpp
+TraceDiag diag = trace.getDiagnostics();
+
+Serial.printf("allocation requested: %s\n", Strata::toString(diag.requestedAllocationPlacement));
+Serial.printf("recent region: %s\n", Strata::toString(diag.recentStorageRegion));
+Serial.printf("task stack region: %s\n", Strata::toString(diag.taskStackRegion));
+```
+
+## Allocation behavior
+
+The internal queue records remain fixed-size `TraceRecord` values. After `Trace::init()`, accepted direct C-string log calls do not allocate on the internal enqueue path while target queues have capacity and no output-boundary conversion is triggered.
+
+Public/output-boundary values use Strata-backed storage:
+
+* `TraceLog` strings are `Strata::String`.
+* `TraceLogList` is `Strata::Vector<TraceLog>`.
+* `TraceLogBatch::logs` is a `TraceLogList`.
+* query values and flush batches follow `memory.allocation`.
+* realtime conversion follows `realtimeAllocation` or the inherited general policy.
+
+Caller-owned allocations, such as captures created before a callback is passed to Trace or caller-created `std::string` values, remain the caller's responsibility.
+
 ## Important notes
 
 > [!IMPORTANT]
 > `info()`, `debug()`, `warn()`, `error()`, and `fatal()` only enqueue logs. `onLog()` and `onFlush()` callbacks run later from the internal Trace task.
 
 * `maxRecentLogs` controls queryable in-RAM history only.
-* `maxRealtimeLogs` controls the realtime delivery queue used by `onLog()` and stream output.
+* `maxRealtimeLogs` controls realtime delivery used by `onLog()` and stream output.
 * `maxPendingLogs` controls unsaved logs waiting for flush.
-* `maxFlushBatchLogs` controls how many public `TraceLog` objects are converted per flush callback. `0` keeps flush batches uncapped.
-* Queue-count `0` disables that queue. Payload-cap `0` uses the compiled maximum for that payload type.
-* `setStream()` writes formatted realtime logs to any Arduino `Print` stream such as `Serial`, `Serial1`, `WiFiClient`, or a custom sink.
-* Stream output uses ANSI colors by default. Callback, flush, and query `TraceLog::formatted` values stay plain text.
-* After `Trace::init()`, accepted direct C-string log calls do not allocate on the internal enqueue path when all target queues have capacity and no output-boundary conversion is triggered.
-* Query APIs, flush batch conversion, `onLog()` conversion, stream implementations, and user-created `std::string` values may still allocate.
-* Fixed queue storage is approximately `sizeof(TraceRecord) * (maxRecentLogs + maxRealtimeLogs + maxPendingLogs)` for enabled queues. Runtime payload caps do not shrink `TraceRecord`.
-* `onLog()` is for realtime observation; `onFlush()` is for persistence.
+* `maxFlushBatchLogs` bounds the number of public `TraceLog` objects converted per flush callback. `0` keeps flush batches uncapped.
+* Queue-count `0` disables that queue and allocates no ring storage for it.
+* `setStream()` writes formatted realtime logs to any Arduino `Print` implementation.
 * Callbacks should avoid long blocking work and should not recursively call Trace logging methods.
 * Trace does not own attached `Print` or `Tempo` instances. Keep them alive until `Trace::end()` completes.
-* Detaching or replacing `Print` or `Tempo` while Trace is active does not synchronize already snapshotted worker use.
 * Stack sizes are FreeRTOS byte sizes on ESP32 and must be at least 1024 bytes.
-* `TraceStackType::Auto` prefers PSRAM task stacks when supported and falls back to internal RAM.
-* `storageMemory` controls recent and pending log buffers. `realtimeStorageMemory` controls realtime delivery storage separately.
-
-## Examples
-
-| Example | Description |
-| --- | --- |
-| `Basic` | Minimal init, realtime log printing, and manual flush. |
-| `JsonPayloads` | Compact and pretty ArduinoJson payload logging. |
-| `PrintfFormatting` | `printf`-style logging helpers. |
-| `CallbacksAndFlush` | Realtime observation and persistence callback behavior. |
-| `Diagnostics` | Runtime counters and query helpers. |
-| `TempoTimestamps` | Full, minimal, and custom Tempo timestamp formatting. |
-| `OverflowPolicies` | Pending queue limits and overflow policy configuration. |
-
-Start with:
-
-```txt
-examples/Basic
-```
-
-## Documentation
-
-Detailed documentation is available in the `docs/` folder.
-
-| Document | Description |
-| --- | --- |
-| [`docs/getting-started.md`](docs/getting-started.md) | Step-by-step setup and first log flow. |
-| [`docs/configuration.md`](docs/configuration.md) | Config options, queue limits, flushing, and stack behavior. |
-| [`docs/api.md`](docs/api.md) | Public classes, result types, callbacks, and diagnostics. |
-| [`docs/examples.md`](docs/examples.md) | Explanation of all included examples. |
-| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common issues and solutions. |
 
 ## API overview
 
@@ -131,6 +157,7 @@ Detailed documentation is available in the `docs/` folder.
 Trace trace;
 trace.init();
 trace.setStream(&Serial);
+
 trace.onLog([](const TraceLog &log) {});
 trace.onFlush([](const TraceLogBatch &batch) {
 	return TraceFlushResult::Ok;
@@ -140,11 +167,49 @@ trace.info("WIFI", "connected");
 trace.errorf("HTTP", "status=%d", 500);
 
 TraceDiag diag = trace.getDiagnostics();
-std::vector<TraceLog> errors = trace.getLogs(TraceLevel::Error);
+TraceLogList errors = trace.getLogs(TraceLevel::Error);
 trace.flushAndWait(2000);
 ```
 
-For the full API, see [`docs/api.md`](docs/api.md).
+## v0.2.x to v0.3.0 migration
+
+Trace v0.3.0 intentionally adopts the shared ZekStack Strata API instead of retaining library-specific memory enums.
+
+| v0.2.x | v0.3.0 |
+| --- | --- |
+| `TraceStackType::Auto` | `Strata::Placement::PreferExternal` |
+| `TraceStackType::Internal` | `Strata::Placement::Internal` |
+| `TraceStackType::Psram` | `Strata::Placement::RequireExternal` |
+| `TraceStorageMemory::Internal` | `Strata::Placement::Internal` |
+| `TraceStorageMemory::PreferPsram` | `Strata::Placement::PreferExternal` |
+| `TraceStorageMemory::RequirePsram` | `Strata::Placement::RequireExternal` |
+| `config.stackType` | `config.memory.taskStack` |
+| `config.storageMemory` | `config.memory.allocation` |
+| `config.realtimeStorageMemory` | `config.realtimeAllocation` |
+| `std::vector<TraceLog>` query results | `TraceLogList` |
+| `TraceResult::message` as `std::string` | `const char *` |
+
+The default storage policy also changes: v0.3.0 prefers external memory for movable Trace-owned allocations and the task stack.
+
+## Examples
+
+| Example | Description |
+| --- | --- |
+| `Basic` | Minimal init, realtime log printing, and manual flush. |
+| `JsonPayloads` | Compact and pretty ArduinoJson payload logging. |
+| `PrintfFormatting` | `printf`-style logging helpers. |
+| `CallbacksAndFlush` | Realtime observation and persistence callback behavior. |
+| `Diagnostics` | Runtime counters, requested placements, and observed regions. |
+| `TempoTimestamps` | Tempo timestamp formatting. |
+| `OverflowPolicies` | Pending queue limits and overflow policy configuration. |
+
+## Documentation
+
+* [`docs/getting-started.md`](docs/getting-started.md)
+* [`docs/configuration.md`](docs/configuration.md)
+* [`docs/api.md`](docs/api.md)
+* [`docs/examples.md`](docs/examples.md)
+* [`docs/troubleshooting.md`](docs/troubleshooting.md)
 
 ## Compatibility
 
@@ -153,59 +218,10 @@ For the full API, see [`docs/api.md`](docs/api.md).
 | Framework | Arduino ESP32 |
 | Platform | `espressif32` |
 | Language | C++20 |
-| Filesystem | none |
-| PSRAM | Optional for task stacks and opt-in recent, realtime, and pending log storage |
-| Dependencies | `bblanchon/ArduinoJson >= 7.0.0` |
-| Exceptions | Not used |
-| Status | Release `0.2.1` |
-
-## Configuration
-
-```cpp
-TraceConfig config;
-config.stackSize = 4096;
-config.storageMemory = TraceStorageMemory::Internal;
-config.realtimeStorageMemory = TraceStorageMemory::Internal;
-config.maxRecentLogs = 100;
-config.maxRealtimeLogs = 100;
-config.maxPendingLogs = 50;
-config.maxFlushBatchLogs = 0;
-config.flushEveryLogs = 20;
-config.flushIntervalMs = 30000;
-config.retryIntervalMs = 1000;
-config.overflowPolicy = TraceOverflowPolicy::DropOldestPending;
-config.enableColors = true;
-config.maxTagLength = 32;
-config.maxMessageLength = 256;
-config.maxFormattedLength = 384;
-
-TraceResult result = trace.init(config);
-```
-
-Opt recent, pending, and realtime queues into PSRAM with internal fallback:
-
-```cpp
-config.storageMemory = TraceStorageMemory::PreferPsram;
-config.realtimeStorageMemory = TraceStorageMemory::PreferPsram;
-config.maxFlushBatchLogs = 25;
-```
-
-For all options, see [`docs/configuration.md`](docs/configuration.md).
-
-## Error handling
-
-Trace reports operation status through `TraceResult`.
-
-```cpp
-TraceResult result = trace.flushAndWait(2000);
-
-if (!result) {
-	Serial.println(result.message.c_str());
-	return;
-}
-```
-
-For result fields and status codes, see [`docs/api.md`](docs/api.md).
+| PSRAM | Optional; preferred by default for movable Trace-owned memory |
+| Dependencies | ArduinoJson >= 7.0.0, Strata v0.1.2 |
+| Exceptions in Trace production sources | Not used |
+| Status | v0.3.0 |
 
 ## License
 
