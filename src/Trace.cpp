@@ -19,7 +19,7 @@ TraceResult TraceResult::failure(TraceStatus status, const char *message) {
 }
 
 Trace::Trace()
-    : _impl(Strata::makeUnique<TraceImpl>(Strata::Placement::PreferExternal)) {
+    : _impl(Strata::makeUnique<TraceImpl>(Strata::Placement::Internal)) {
 }
 
 Trace::~Trace() {
