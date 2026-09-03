@@ -270,12 +270,14 @@ TraceResult Trace::end(uint32_t timeoutMs) {
 		if (!_impl->initialized) {
 			return TraceResult::success("trace is not initialized");
 		}
-		_impl->stopping = true;
-		_impl->flushRequested = true;
-		_impl->shutdownDeadlineMs =
-		    timeoutMs == UINT32_MAX ? 0 : static_cast<uint64_t>(millis()) + timeoutMs;
-		_impl->shutdownTimedOut = false;
-		_impl->shutdownFlushFailed = false;
+		if (!_impl->stopping) {
+			_impl->stopping = true;
+			_impl->flushRequested = true;
+			_impl->shutdownDeadlineMs =
+			    timeoutMs == UINT32_MAX ? 0 : static_cast<uint64_t>(millis()) + timeoutMs;
+			_impl->shutdownTimedOut = false;
+			_impl->shutdownFlushFailed = false;
+		}
 		handle = _impl->task.handle();
 	}
 	if (handle != nullptr) {
