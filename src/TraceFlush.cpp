@@ -55,8 +55,9 @@ void TraceImpl::performFlush() {
 	}
 
 	while (true) {
-		TraceFlushCallback callback;
-		TraceLogBatch batch;
+		std::shared_ptr<TraceFlushCallback> callback;
+		const Strata::Placement placement = allocationPlacement();
+		TraceLogBatch batch(placement);
 		uint64_t maxSequence = 0;
 		{
 			TraceLock lock(mutex);
@@ -74,7 +75,7 @@ void TraceImpl::performFlush() {
 			for (size_t i = 0; i < batchSize; ++i) {
 				TraceRecord record;
 				if (pendingLogs.peek(i, record)) {
-					batch.logs.push_back(toPublicLog(record));
+					batch.logs.push_back(toPublicLog(record, placement));
 				}
 			}
 			if (!batch.logs.empty()) {
@@ -87,8 +88,8 @@ void TraceImpl::performFlush() {
 		}
 
 		TraceFlushResult flushResult = TraceFlushResult::Ok;
-		if (callback && !batch.logs.empty()) {
-			flushResult = callback(batch);
+		if (callback && *callback && !batch.logs.empty()) {
+			flushResult = (*callback)(batch);
 		}
 
 		{
@@ -183,6 +184,9 @@ TickType_t TraceImpl::waitTicks() {
 }
 
 TraceResult Trace::flush() {
+	if (!_impl) {
+		return TraceResult::failure(TraceStatus::OutOfMemory, "failed to allocate trace state");
+	}
 	{
 		TraceLock lock(_impl->mutex);
 		if (!lock) {
@@ -198,6 +202,9 @@ TraceResult Trace::flush() {
 }
 
 TraceResult Trace::flushAndWait(uint32_t timeoutMs) {
+	if (!_impl) {
+		return TraceResult::failure(TraceStatus::OutOfMemory, "failed to allocate trace state");
+	}
 	uint32_t startGeneration = 0;
 	uint64_t targetSequence = 0;
 	{

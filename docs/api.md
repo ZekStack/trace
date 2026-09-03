@@ -4,19 +4,34 @@
 
 `TraceResult` contains:
 
-| Field | Description |
-| --- | --- |
-| `result` | `true` on success. |
-| `status` | Machine-readable `TraceStatus`. |
-| `message` | Human-readable status text. |
+| Field | Type | Description |
+| --- | --- | --- |
+| `result` | `bool` | `true` on success. |
+| `status` | `TraceStatus` | Machine-readable status. |
+| `message` | `const char *` | Static human-readable status text. |
+
+Trace-owned result messages are literals and do not require dynamic string ownership.
 
 `TraceFlushResult` values are `Ok`, `Failed`, and `Retry`.
 
-`Ok` removes flushed pending logs. `Failed` is terminal for the current `flushAndWait()` call but retains pending logs. `Retry` retains pending logs, schedules another attempt using `TraceConfig::retryIntervalMs`, and keeps `flushAndWait()` waiting until `Ok`, `Failed`, or timeout. Normal flush requests do not bypass the retry deadline; urgent error and fatal flush requests may bypass it.
+## TraceConfig memory API
 
-`TraceConfig::maxFlushBatchLogs` can cap the number of public `TraceLog` objects passed to each `onFlush()` callback. `0` means uncapped.
+Trace v0.3.0 uses Strata directly:
 
-`flushAndWait()` waits until all pending logs that existed when it was called have been successfully flushed. Logs appended after the call may remain pending for a later flush cycle.
+```cpp
+struct TraceConfig {
+	Strata::MemoryPolicy memory{
+		.allocation = Strata::Placement::PreferExternal,
+		.taskStack = Strata::Placement::PreferExternal,
+	};
+	std::optional<Strata::Placement> realtimeAllocation{};
+	// ...
+};
+```
+
+`realtimeAllocation == std::nullopt` means inherit `memory.allocation`.
+
+The old `TraceStackType` and `TraceStorageMemory` enums were removed in v0.3.0.
 
 ## Main methods
 
@@ -50,60 +65,107 @@ TraceResult warn(const char *tag, const JsonDocument &doc);
 TraceResult error(const char *tag, const JsonDocument &doc);
 TraceResult fatal(const char *tag, const JsonDocument &doc);
 
-TraceResult debugf(const char *tag, const char *format, ...);
-TraceResult infof(const char *tag, const char *format, ...);
-TraceResult warnf(const char *tag, const char *format, ...);
-TraceResult errorf(const char *tag, const char *format, ...);
-TraceResult fatalf(const char *tag, const char *format, ...);
-
 TraceResult flush();
 TraceResult flushAndWait(uint32_t timeoutMs);
 ```
 
-## Query methods
-
-```cpp
-TraceDiag getDiagnostics();
-TraceLog getLastLog();
-std::vector<TraceLog> getLogs();
-std::vector<TraceLog> getLogs(TraceLevel level);
-std::vector<TraceLog> getLastLogs(size_t count);
-std::vector<TraceLog> getLogsByTag(const char *tag);
-```
-
-`TraceDiag` includes queue counts, drop and flush counters, task stack information, queue allocation byte counts, and PSRAM placement flags for recent, realtime, and pending queues.
-
-`flushSuccessCount` counts successful `onFlush()` batch callbacks, not high-level flush cycles. When `TraceConfig::maxFlushBatchLogs > 0`, one flush cycle may increment it multiple times.
+The `std::string` message overloads remain accepted as caller-owned input. Trace copies bounded content into its fixed internal record instead of taking ownership of the caller's string.
 
 ## TraceLog
 
-`TraceLog` stores `sequence`, `level`, `tag`, `message`, `formatted`, `timeText`, `uptimeMs`, and `truncated`.
+`TraceLog` stores:
 
-Without Tempo, `formatted` uses:
+```cpp
+uint64_t sequence;
+TraceLevel level;
+Strata::String tag;
+Strata::String message;
+Strata::String formatted;
+Strata::String timeText;
+uint64_t uptimeMs;
+bool truncated;
+```
+
+`TraceLog` accepts an optional `Strata::Placement` constructor argument. Trace itself creates logs with the correct resolved placement for the operation.
+
+Without Tempo, formatted output is:
 
 ```txt
 [L][TAG] - Message
 ```
 
-With Tempo, `formatted` uses:
+With Tempo:
 
 ```txt
 [L][TAG](time) - Message
 ```
 
-`L` is the short level label: `D`, `I`, `W`, `E`, `F`, or `?`.
+## TraceLogList and queries
+
+```cpp
+using TraceLogList = Strata::Vector<TraceLog>;
+
+TraceDiag getDiagnostics();
+TraceLog getLastLog();
+TraceLogList getLogs();
+TraceLogList getLogs(TraceLevel level);
+TraceLogList getLastLogs(size_t count);
+TraceLogList getLogsByTag(const char *tag);
+```
+
+Query list backing storage and each returned log's owned strings follow `TraceConfig::memory.allocation`.
+
+## TraceLogBatch
+
+```cpp
+struct TraceLogBatch {
+	TraceLogList logs;
+	uint64_t createdAtUptimeMs;
+};
+```
+
+Flush batch storage follows `TraceConfig::memory.allocation`. `maxFlushBatchLogs` can cap the number of public logs converted per callback invocation.
+
+## Diagnostics
+
+`TraceDiag` includes queue counts, drop/flush counters, stack high-water mark, fixed queue allocation sizes, and Strata placement information.
+
+Memory-related fields are:
+
+```cpp
+Strata::Placement requestedAllocationPlacement;
+Strata::Placement requestedRealtimeAllocationPlacement;
+Strata::Placement requestedTaskStackPlacement;
+Strata::Region taskStackRegion;
+
+size_t recentAllocatedBytes;
+size_t realtimeAllocatedBytes;
+size_t pendingAllocatedBytes;
+Strata::Region recentStorageRegion;
+Strata::Region realtimeStorageRegion;
+Strata::Region pendingStorageRegion;
+```
+
+Use `Strata::toString()` to present `Placement` and `Region` values.
+
+A `PreferExternal` request may report `Internal` when Strata fell back because external memory was unavailable. `RequireExternal` never falls back.
 
 ## Callbacks
 
-`onLog()` is for realtime observation. `onFlush()` is for persistence. Both callbacks run from the internal Trace task and are `std::function` callbacks, so `std::bind` and lambdas with captures are supported.
+```cpp
+using TraceFlushCallback = std::function<TraceFlushResult(const TraceLogBatch &)>;
+using TraceLogCallback = std::function<void(const TraceLog &)>;
+```
 
-Callbacks should avoid long blocking work and should not recursively log through the same Trace instance.
+Trace stores callback holders through Strata-backed shared ownership. The flush callback holder follows the general allocation policy; the realtime callback holder follows the resolved realtime allocation policy.
 
-`onLog()` and stream output are delivered from a dedicated realtime queue controlled by `TraceConfig::maxRealtimeLogs`. They do not depend on `maxRecentLogs`.
+Allocations already owned by the caller's lambda/capture before it is passed to Trace remain caller-owned.
+
+Both callbacks run from the internal Trace task. Avoid long blocking work and do not recursively log through the same Trace instance.
 
 ## Stream output
 
-`setStream()` writes formatted realtime logs to any Arduino `Print` stream.
+`setStream()` writes formatted realtime logs to any Arduino `Print` stream. Trace does not own the stream.
 
 ```cpp
 trace.setStream(&Serial);
@@ -112,14 +174,14 @@ trace.setStream(&client);
 trace.setStream(nullptr);
 ```
 
-Trace does not own the stream. Keep the stream alive until `Trace::end()` completes. Stream output runs from the internal Trace task and coexists with `onLog()` when both are configured.
+Keep the stream alive until `Trace::end()` completes.
 
-Calling `setStream(nullptr)` or replacing the stream while Trace is active does not synchronize already snapshotted worker use. Use `Trace::end()` as the synchronization point before destroying an attached stream.
+## Shutdown ownership
 
-Stream output uses ANSI colors by default when `TraceConfig::enableColors` is `true`. `onLog()`, `onFlush()`, and query helpers receive plain `TraceLog::formatted` text without color codes.
+The internal worker is a `Strata::FreeRTOS::Task`. The task does not self-delete. On shutdown it completes its work, publishes that it is ready for deletion, and suspends. `Trace::end()` then resets the Strata task from the caller context before releasing buffers.
+
+If a timed `end()` returns before the worker is ready, ownership is retained so cleanup can be retried. The destructor performs an unbounded `end()` to prevent the task from outliving the Trace implementation.
 
 ## Tempo lifetime
 
-Trace does not own attached `Tempo` instances. Keep the attached `Tempo` alive until `Trace::end()` completes.
-
-Calling `detachTempo()` or attaching another `Tempo` while Trace is active does not synchronize already snapshotted worker use.
+Trace does not own an attached `Tempo`. Keep it alive until `Trace::end()` completes.

@@ -24,8 +24,8 @@ size_t effectiveLimit(size_t limit, size_t maximum) {
 }
 } // namespace trace_detail
 
-TraceLog TraceImpl::toPublicLog(const TraceRecord &record) {
-	TraceLog log;
+TraceLog TraceImpl::toPublicLog(const TraceRecord &record, Strata::Placement placement) {
+	TraceLog log(placement);
 	log.sequence = record.sequence;
 	log.level = record.level;
 	log.tag = record.tag;
@@ -52,15 +52,29 @@ void TraceImpl::formatLog(TraceLog &log) {
 	if (tempoSnapshot != nullptr) {
 		hasTime = formatTempoTime(*tempoSnapshot, tempoConfigSnapshot, timeBuffer, sizeof(timeBuffer));
 	}
+
 	if (hasTime) {
 		log.timeText = timeBuffer;
-		log.formatted = std::string("[") + levelName(log.level) + "][" + log.tag + "](" +
-		                log.timeText + ") - " + log.message;
 	} else {
 		log.timeText.clear();
-		log.formatted = std::string("[") + levelName(log.level) + "][" + log.tag + "] - " +
-		                log.message;
 	}
+
+	log.formatted.clear();
+	const size_t estimated = log.tag.size() + log.message.size() + log.timeText.size() + 16;
+	log.formatted.reserve(estimated);
+	log.formatted.push_back('[');
+	log.formatted.append(levelName(log.level));
+	log.formatted.append("][");
+	log.formatted.append(log.tag.data(), log.tag.size());
+	log.formatted.push_back(']');
+	if (hasTime) {
+		log.formatted.push_back('(');
+		log.formatted.append(log.timeText.data(), log.timeText.size());
+		log.formatted.append(") - ");
+	} else {
+		log.formatted.append(" - ");
+	}
+	log.formatted.append(log.message.data(), log.message.size());
 }
 
 bool TraceImpl::formatTempoTime(

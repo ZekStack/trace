@@ -2,19 +2,36 @@
 
 #include "FreeRTOS.h"
 
-#include <mutex>
+#include <memory>
 
 using SemaphoreHandle_t = std::recursive_mutex *;
 
-inline SemaphoreHandle_t xSemaphoreCreateRecursiveMutex() {
-	return new std::recursive_mutex();
+inline SemaphoreHandle_t traceHostCreateMutex(StaticSemaphore_t *storage) {
+	if (storage == nullptr) {
+		return nullptr;
+	}
+	auto *mutex = std::construct_at(
+	    reinterpret_cast<std::recursive_mutex *>(storage->storage)
+	);
+	storage->constructed = true;
+	return mutex;
+}
+
+inline SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *storage) {
+	return traceHostCreateMutex(storage);
+}
+
+inline SemaphoreHandle_t xSemaphoreCreateRecursiveMutexStatic(StaticSemaphore_t *storage) {
+	return traceHostCreateMutex(storage);
 }
 
 inline void vSemaphoreDelete(SemaphoreHandle_t handle) {
-	delete handle;
+	if (handle != nullptr) {
+		std::destroy_at(handle);
+	}
 }
 
-inline BaseType_t xSemaphoreTakeRecursive(SemaphoreHandle_t handle, TickType_t timeout) {
+inline BaseType_t xSemaphoreTake(SemaphoreHandle_t handle, TickType_t timeout) {
 	(void)timeout;
 	if (handle == nullptr) {
 		return pdFALSE;
@@ -23,8 +40,18 @@ inline BaseType_t xSemaphoreTakeRecursive(SemaphoreHandle_t handle, TickType_t t
 	return pdTRUE;
 }
 
-inline void xSemaphoreGiveRecursive(SemaphoreHandle_t handle) {
-	if (handle != nullptr) {
-		handle->unlock();
+inline BaseType_t xSemaphoreGive(SemaphoreHandle_t handle) {
+	if (handle == nullptr) {
+		return pdFALSE;
 	}
+	handle->unlock();
+	return pdTRUE;
+}
+
+inline BaseType_t xSemaphoreTakeRecursive(SemaphoreHandle_t handle, TickType_t timeout) {
+	return xSemaphoreTake(handle, timeout);
+}
+
+inline BaseType_t xSemaphoreGiveRecursive(SemaphoreHandle_t handle) {
+	return xSemaphoreGive(handle);
 }

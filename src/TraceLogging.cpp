@@ -28,7 +28,6 @@ void copyToRecordField(
 		truncated = true;
 	}
 }
-
 } // namespace
 
 TraceResult TraceImpl::appendLog(TraceRecord record) {
@@ -133,9 +132,10 @@ void TraceImpl::addRealtimeLocked(const TraceRecord &record) {
 
 void TraceImpl::processRealtimeLogs() {
 	while (true) {
-		TraceLogCallback callback;
+		std::shared_ptr<TraceLogCallback> callback;
 		Print *streamSnapshot = nullptr;
 		bool colorsEnabled = true;
+		Strata::Placement placement = Strata::Placement::PreferExternal;
 		TraceRecord record;
 		{
 			TraceLock lock(mutex);
@@ -145,6 +145,7 @@ void TraceImpl::processRealtimeLogs() {
 			callback = onLog;
 			streamSnapshot = stream;
 			colorsEnabled = config.enableColors;
+			placement = realtimeAllocationPlacement();
 			if (!callback && streamSnapshot == nullptr) {
 				realtimeLogs.clear();
 				return;
@@ -154,7 +155,7 @@ void TraceImpl::processRealtimeLogs() {
 			}
 		}
 
-		TraceLog log = toPublicLog(record);
+		TraceLog log = toPublicLog(record, placement);
 		formatLog(log);
 		if (streamSnapshot != nullptr) {
 			const char *color = colorsEnabled ? levelColor(log.level) : "";
@@ -166,8 +167,8 @@ void TraceImpl::processRealtimeLogs() {
 				streamSnapshot->println(log.formatted.c_str());
 			}
 		}
-		if (callback) {
-			callback(log);
+		if (callback && *callback) {
+			(*callback)(log);
 		}
 	}
 }
@@ -184,6 +185,9 @@ size_t Trace::boundedStrLen(const char *value, size_t maxLen) {
 }
 
 size_t Trace::getMaxTagLength() const {
+	if (!_impl) {
+		return TRACE_RECORD_MAX_TAG_LENGTH;
+	}
 	TraceLock lock(_impl->mutex);
 	if (!lock) {
 		return TRACE_RECORD_MAX_TAG_LENGTH;
@@ -192,6 +196,9 @@ size_t Trace::getMaxTagLength() const {
 }
 
 size_t Trace::getMaxMessageLength() const {
+	if (!_impl) {
+		return TRACE_RECORD_MAX_MESSAGE_LENGTH;
+	}
 	TraceLock lock(_impl->mutex);
 	if (!lock) {
 		return TRACE_RECORD_MAX_MESSAGE_LENGTH;
@@ -203,6 +210,9 @@ size_t Trace::getMaxMessageLength() const {
 }
 
 size_t Trace::getMaxFormattedLength() const {
+	if (!_impl) {
+		return TRACE_FORMATTED_BUFFER_LENGTH;
+	}
 	TraceLock lock(_impl->mutex);
 	if (!lock) {
 		return TRACE_FORMATTED_BUFFER_LENGTH;
@@ -238,6 +248,9 @@ TraceResult Trace::logRaw(
 ) {
 	if (tag == nullptr || tagLen == 0) {
 		return TraceResult::failure(TraceStatus::InvalidArgument, "tag is required");
+	}
+	if (!_impl) {
+		return TraceResult::failure(TraceStatus::OutOfMemory, "failed to allocate trace state");
 	}
 	TraceConfig config;
 	{
@@ -282,7 +295,7 @@ TraceResult Trace::logRaw(
 TraceResult Trace::logJson(TraceLevel level, const char *tag, const JsonDocument &doc) {
 	TraceJsonFormat format = TraceJsonFormat::Compact;
 	size_t maxFormattedLength = TraceConfig().maxFormattedLength;
-	{
+	if (_impl) {
 		TraceLock lock(_impl->mutex);
 		if (lock) {
 			format = _impl->config.jsonFormat;
