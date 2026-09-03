@@ -10,6 +10,7 @@
 #include <vector>
 
 std::atomic<uint64_t> trace_host_millis{0};
+std::atomic<int> trace_host_active_tasks{0};
 std::atomic<size_t> trace_host_global_allocations{0};
 
 void *operator new(std::size_t size) {
@@ -120,8 +121,16 @@ void basicLifecycleAndQueries(TestRunner &runner) {
 	runner.check(last.tag == "BOOT", "last log tag");
 	runner.check(last.message == "ready", "last log message");
 	runner.check(last.formatted == "[I][BOOT] - ready", "formatted output");
+	runner.check(
+	    last.message.get_allocator().placement() == Strata::Placement::PreferExternal,
+	    "default query strings preserve requested external-preferred placement"
+	);
 	TraceLogList logs = trace.getLogs();
 	runner.check(logs.size() == 1, "query returns one log");
+	runner.check(
+	    logs.get_allocator().placement() == Strata::Placement::PreferExternal,
+	    "default query vector preserves requested external-preferred placement"
+	);
 	TraceDiag diag = trace.getDiagnostics();
 	runner.check(diag.recentLogCount == 1, "diagnostic recent count");
 	runner.check(
@@ -174,6 +183,7 @@ void requiredExternalFailuresAreAtomic(TestRunner &runner) {
 		config.memory.taskStack = Strata::Placement::Internal;
 		TraceResult result = trace.init(config);
 		runner.check(!result && result.status == TraceStatus::OutOfMemory, "required external buffers fail on generic host");
+		runner.check(trace_host_active_tasks.load() == 0, "buffer allocation failure creates no task");
 		runner.check(trace.end(), "failed buffer init leaves trace clean");
 	}
 	resetClock();
@@ -184,6 +194,7 @@ void requiredExternalFailuresAreAtomic(TestRunner &runner) {
 		config.memory.taskStack = Strata::Placement::RequireExternal;
 		TraceResult result = trace.init(config);
 		runner.check(!result && result.status == TraceStatus::TaskCreateFailed, "required external stack fails on generic host");
+		runner.check(trace_host_active_tasks.load() == 0, "failed task creation leaks no host task");
 		runner.check(trace.end(), "failed task init leaves trace clean");
 	}
 }
@@ -227,6 +238,61 @@ void realtimeDelivery(TestRunner &runner) {
 	    "realtime override visible in diagnostics"
 	);
 	runner.check(trace.end(), "realtime end");
+}
+
+void configuredOutputPlacementsPropagate(TestRunner &runner) {
+	resetClock();
+	Trace trace;
+	std::atomic<bool> realtimeChecked{false};
+	std::atomic<bool> flushChecked{false};
+
+	// Register before init to verify that runtime ownership is re-homed after config is applied.
+	trace.onLog([&realtimeChecked](const TraceLog &log) {
+		realtimeChecked.store(
+		    log.message.get_allocator().placement() == Strata::Placement::Internal &&
+		        log.formatted.get_allocator().placement() == Strata::Placement::Internal,
+		    std::memory_order_relaxed
+		);
+	});
+	trace.onFlush([&flushChecked](const TraceLogBatch &batch) {
+		bool ok = batch.logs.get_allocator().placement() == Strata::Placement::Internal;
+		if (!batch.logs.empty()) {
+			ok = ok &&
+		     batch.logs.front().message.get_allocator().placement() == Strata::Placement::Internal &&
+		     batch.logs.front().formatted.get_allocator().placement() == Strata::Placement::Internal;
+		}
+		flushChecked.store(ok, std::memory_order_relaxed);
+		return TraceFlushResult::Ok;
+	});
+
+	TraceConfig config = baseConfig();
+	config.memory.allocation = Strata::Placement::Internal;
+	config.memory.taskStack = Strata::Placement::Internal;
+	config.realtimeAllocation = Strata::Placement::Internal;
+	runner.check(trace.init(config), "configured placement init");
+	runner.check(trace.info("PLACEMENT", "internal"), "configured placement log");
+	runner.check(
+	    waitUntil([&]() { return realtimeChecked.load(std::memory_order_relaxed); }),
+	    "realtime public values use realtime placement"
+	);
+	runner.check(trace.flushAndWait(1000), "configured placement flush");
+	runner.check(flushChecked.load(std::memory_order_relaxed), "flush batch uses general placement");
+
+	TraceLog last = trace.getLastLog();
+	TraceLogList logs = trace.getLogs();
+	runner.check(
+	    last.tag.get_allocator().placement() == Strata::Placement::Internal,
+	    "single query strings use general placement"
+	);
+	runner.check(
+	    logs.get_allocator().placement() == Strata::Placement::Internal,
+	    "query vector uses general placement"
+	);
+	runner.check(
+	    !logs.empty() && logs.front().message.get_allocator().placement() == Strata::Placement::Internal,
+	    "query log strings use general placement"
+	);
+	runner.check(trace.end(), "configured placement end");
 }
 
 void flushBatches(TestRunner &runner) {
@@ -311,7 +377,44 @@ void repeatedInitEnd(TestRunner &runner) {
 		runner.check(trace.init(config), "repeated init");
 		runner.check(trace.info("R", "cycle"), "repeated log");
 		runner.check(trace.end(), "repeated end");
+		runner.check(trace_host_active_tasks.load() == 0, "repeated end releases static task ownership");
 	}
+}
+
+void timedEndRetainsOwnershipUntilCleanup(TestRunner &runner) {
+	resetClock();
+	Trace trace;
+	trace.onFlush([](const TraceLogBatch &) { return TraceFlushResult::Retry; });
+	TraceConfig config = baseConfig();
+	config.memory.allocation = Strata::Placement::Internal;
+	config.memory.taskStack = Strata::Placement::Internal;
+	config.retryIntervalMs = 100;
+	runner.check(trace.init(config), "timed end init");
+	runner.check(trace_host_active_tasks.load() == 1, "timed end owns one static task");
+	runner.check(trace.info("END", "pending"), "timed end pending log");
+	TraceResult firstEnd = trace.end(20);
+	runner.check(!firstEnd && firstEnd.status == TraceStatus::Timeout, "timed end reports timeout");
+	runner.check(trace_host_active_tasks.load() == 1, "timed end preserves task ownership");
+	TraceResult cleanup = trace.end(1000);
+	runner.check(cleanup, "later end completes cleanup");
+	runner.check(trace_host_active_tasks.load() == 0, "later end releases static task ownership");
+	runner.check(trace.init(config), "trace can reinitialize after timed cleanup");
+	runner.check(trace.end(), "reinitialized trace ends cleanly");
+}
+
+void destructorReapsOwnedTask(TestRunner &runner) {
+	resetClock();
+	runner.check(trace_host_active_tasks.load() == 0, "destructor test starts without active task");
+	{
+		Trace trace;
+		TraceConfig config = baseConfig();
+		config.memory.allocation = Strata::Placement::Internal;
+		config.memory.taskStack = Strata::Placement::Internal;
+		runner.check(trace.init(config), "destructor ownership init");
+		runner.check(trace_host_active_tasks.load() == 1, "destructor test owns one task");
+		runner.check(trace.info("DTOR", "pending"), "destructor test queues log");
+	}
+	runner.check(trace_host_active_tasks.load() == 0, "destructor releases static task ownership");
 }
 
 void resultMessagesAreStatic(TestRunner &runner) {
@@ -330,11 +433,14 @@ int main() {
 	requiredExternalFailuresAreAtomic(runner);
 	disabledRequiredExternalQueueDoesNotAllocate(runner);
 	realtimeDelivery(runner);
+	configuredOutputPlacementsPropagate(runner);
 	flushBatches(runner);
 	overflowPolicies(runner);
 	filteringAndTruncation(runner);
 	directCStringHotPathDoesNotUseGlobalNew(runner);
 	repeatedInitEnd(runner);
+	timedEndRetainsOwnershipUntilCleanup(runner);
+	destructorReapsOwnedTask(runner);
 	resultMessagesAreStatic(runner);
 
 	if (runner.failed != 0) {
