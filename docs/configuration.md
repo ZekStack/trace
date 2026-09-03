@@ -1,6 +1,6 @@
 # Configuration
 
-`TraceConfig` controls Trace-owned memory placement, the internal task, bounded queues, flush timing, overflow behavior, JSON formatting, level filtering, and stream colors.
+`TraceConfig` controls movable Trace-owned memory placement, the internal task, bounded queues, flush timing, overflow behavior, JSON formatting, level filtering, and stream colors.
 
 ## Defaults
 
@@ -45,7 +45,7 @@ Trace v0.3.0 uses the same memory vocabulary as other Strata-integrated ZekStack
 * query result vectors and `TraceLog` strings;
 * flush batch vectors and strings;
 * general callback holders;
-* other movable Trace-owned allocations.
+* other movable Trace-owned payload allocations.
 
 `memory.taskStack` controls the Trace worker task stack.
 
@@ -80,7 +80,9 @@ config.memory.taskStack = Strata::Placement::PreferExternal;
 config.realtimeAllocation = Strata::Placement::Internal;
 ```
 
-RTOS control structures that Strata requires internally remain internal regardless of Trace's movable-memory policy.
+Trace's small root implementation object is control state, not movable payload storage, and is deliberately kept in internal memory. Strata also keeps FreeRTOS control structures internal where the platform requires it. These control allocations are outside `memory.allocation`; queue payloads, public/output values, callback holders, and the task stack follow the configured policies above.
+
+Callbacks may be registered before `init()`. Because the requested `TraceConfig` is not known yet, Trace initially holds them using the default policy and rebuilds their Strata-owned holders after `init(config)` applies the requested general/realtime placement. Reinitializing Trace with a different policy performs the same re-homing step.
 
 ## Requested placement vs observed region
 
@@ -138,7 +140,7 @@ Public/output-boundary values are Strata-backed in v0.3.0:
 
 This means Trace-owned query, flush, and realtime conversion allocations follow the configured Strata policy instead of the platform default C++ allocator.
 
-Caller-owned values still follow the caller's allocator. For example, allocations made while constructing a lambda capture or a caller-owned `std::string` are outside Trace's ownership boundary.
+Caller-owned values still follow the caller's allocator. For example, allocations made while constructing a lambda capture or a caller-owned `std::string` are outside Trace's ownership boundary. The Strata allocation for the callback holder itself is Trace-owned and follows the configured policy after initialization.
 
 ## Payload limits
 
