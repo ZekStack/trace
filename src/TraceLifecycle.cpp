@@ -200,6 +200,22 @@ TraceResult Trace::init(const TraceConfig &config) {
 			    "failed to allocate trace buffers"
 			);
 		}
+
+		// Callbacks may be registered before init(), when only the default policy is known.
+		// Rebuild the Strata-owned holders after applying the requested configuration so
+		// runtime callback ownership follows the same placement contract as other movable data.
+		if (_impl->onFlush) {
+			_impl->onFlush = Strata::makeShared<TraceFlushCallback>(
+			    _impl->allocationPlacement(),
+			    *_impl->onFlush
+			);
+		}
+		if (_impl->onLog) {
+			_impl->onLog = Strata::makeShared<TraceLogCallback>(
+			    _impl->realtimeAllocationPlacement(),
+			    *_impl->onLog
+			);
+		}
 	}
 
 	Strata::FreeRTOS::Task task = Strata::FreeRTOS::Task::create(
