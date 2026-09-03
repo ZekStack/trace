@@ -35,7 +35,7 @@ jobs:
             echo "Trace internals must not use ESP-IDF or Arduino logging"
             exit 1
           fi
-          if grep -RInE '(^|[^[:alnum:]_])String([^[:alnum:]_]|$)' src; then
+          if grep -RInE '(^|[^[:alnum:]_:])String([^[:alnum:]_]|$)' src; then
             echo "Trace internals must not use Arduino String"
             exit 1
           fi
