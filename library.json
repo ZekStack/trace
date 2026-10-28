@@ -1,6 +1,6 @@
 {
   "name": "Trace",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Logging and diagnostics library for ESP32 devices with Strata-backed bounded buffers and task-side flushing.",
   "keywords": [
     "esp32",
@@ -25,7 +25,7 @@
   "platforms": "espressif32",
   "dependencies": {
     "bblanchon/ArduinoJson": ">=7.0.0",
-    "Strata": "https://github.com/ZekStack/strata.git#v0.1.2"
+    "Strata": "https://github.com/ZekStack/strata.git#v0.1.4"
   },
   "build": {
     "srcDir": "src",

@@ -1,6 +1,6 @@
 # Getting started
 
-Trace v0.3.0 is built for Arduino ESP32, C++20, ArduinoJson v7, and Strata v0.1.2.
+Trace v0.3.0 is built for Arduino ESP32, C++20, ArduinoJson v7, and Strata v0.1.4.
 
 ## Install with PlatformIO
 
@@ -12,7 +12,7 @@ framework = arduino
 
 lib_deps =
   https://github.com/ZekStack/trace.git#v0.3.0
-  https://github.com/ZekStack/strata.git#v0.1.2
+  https://github.com/ZekStack/strata.git#v0.1.4
   bblanchon/ArduinoJson@>=7.0.0
 
 build_flags =
