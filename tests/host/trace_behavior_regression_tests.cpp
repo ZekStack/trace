@@ -672,20 +672,35 @@ void runtimeCapClamping(TestRunner &runner) {
 
 int main() {
 	TestRunner runner;
+	std::cerr << "[trace-regression] realtimeWorksWithoutRecent" << std::endl;
 	realtimeWorksWithoutRecent(runner);
+	std::cerr << "[trace-regression] smallRecentDoesNotDropRealtime" << std::endl;
 	smallRecentDoesNotDropRealtime(runner);
+	std::cerr << "[trace-regression] realtimeOverflowDiagnostics" << std::endl;
 	realtimeOverflowDiagnostics(runner);
+	std::cerr << "[trace-regression] realtimeDisabledHasNoRealtimeDiagnostics" << std::endl;
 	realtimeDisabledHasNoRealtimeDiagnostics(runner);
+	std::cerr << "[trace-regression] pendingOverflowPolicies" << std::endl;
 	pendingOverflowPolicies(runner);
+	std::cerr << "[trace-regression] blockingAndFlushImmediately" << std::endl;
 	blockingAndFlushImmediately(runner);
+	std::cerr << "[trace-regression] flushResults" << std::endl;
 	flushResults(runner);
+	std::cerr << "[trace-regression] retryBackoffRequests" << std::endl;
 	retryBackoffRequests(runner);
+	std::cerr << "[trace-regression] callbacksRunOutsideLock" << std::endl;
 	callbacksRunOutsideLock(runner);
+	std::cerr << "[trace-regression] realtimeDetachStopsFutureRecords" << std::endl;
 	realtimeDetachStopsFutureRecords(runner);
+	std::cerr << "[trace-regression] truncation" << std::endl;
 	truncation(runner);
+	std::cerr << "[trace-regression] shutdownResults" << std::endl;
 	shutdownResults(runner);
+	std::cerr << "[trace-regression] cappedFlushBarriers" << std::endl;
 	cappedFlushBarriers(runner);
+	std::cerr << "[trace-regression] ringOrderAndSequenceConsistency" << std::endl;
 	ringOrderAndSequenceConsistency(runner);
+	std::cerr << "[trace-regression] runtimeCapClamping" << std::endl;
 	runtimeCapClamping(runner);
 
 	if (runner.failed != 0) {
