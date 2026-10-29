@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -276,10 +277,14 @@ void retryBackoffRequests(TestRunner &runner) {
 	{
 		Trace trace;
 		std::atomic<int> attempts{0};
+		std::mutex attemptTimesMutex;
 		std::vector<uint64_t> attemptTimes;
-		trace.onFlush([&attempts, &attemptTimes](const TraceLogBatch &) {
+		trace.onFlush([&attempts, &attemptTimes, &attemptTimesMutex](const TraceLogBatch &) {
+			{
+				std::lock_guard<std::mutex> lock(attemptTimesMutex);
+				attemptTimes.push_back(trace_host_millis.load());
+			}
 			attempts.fetch_add(1);
-			attemptTimes.push_back(trace_host_millis.load());
 			return TraceFlushResult::Retry;
 		});
 		TraceConfig config = baseConfig();
@@ -294,9 +299,12 @@ void retryBackoffRequests(TestRunner &runner) {
 		TraceResult blocked = trace.info("R", "two");
 		runner.check(!blocked && blocked.status == TraceStatus::Timeout, "normal full-queue request waits for space");
 		bool retrySpacingOk = true;
-		for (size_t i = 1; i < attemptTimes.size(); ++i) {
-			if (attemptTimes[i] < attemptTimes[i - 1] + config.retryIntervalMs) {
-				retrySpacingOk = false;
+		{
+			std::lock_guard<std::mutex> lock(attemptTimesMutex);
+			for (size_t i = 1; i < attemptTimes.size(); ++i) {
+				if (attemptTimes[i] < attemptTimes[i - 1] + config.retryIntervalMs) {
+					retrySpacingOk = false;
+				}
 			}
 		}
 		runner.check(retrySpacingOk, "normal full-queue request does not bypass retry interval");
@@ -591,8 +599,12 @@ void ringOrderAndSequenceConsistency(TestRunner &runner) {
 	resetClock();
 	Trace trace;
 	std::vector<uint64_t> realtimeSequences;
+	std::mutex realtimeSequencesMutex;
 	std::vector<uint64_t> flushedSequences;
-	trace.onLog([&realtimeSequences](const TraceLog &log) { realtimeSequences.push_back(log.sequence); });
+	trace.onLog([&realtimeSequences, &realtimeSequencesMutex](const TraceLog &log) {
+		std::lock_guard<std::mutex> lock(realtimeSequencesMutex);
+		realtimeSequences.push_back(log.sequence);
+	});
 	trace.onFlush([&flushedSequences](const TraceLogBatch &batch) {
 		for (const TraceLog &log : batch.logs) {
 			flushedSequences.push_back(log.sequence);
@@ -609,17 +621,26 @@ void ringOrderAndSequenceConsistency(TestRunner &runner) {
 	for (int i = 1; i <= 5; ++i) {
 		runner.check(trace.infof("SEQ", "item=%d", i), "sequence log");
 	}
-	runner.check(waitUntil([&realtimeSequences]() { return realtimeSequences.size() == 5; }), "realtime sees five logs");
+	runner.check(
+	    waitUntil([&realtimeSequences, &realtimeSequencesMutex]() {
+		    std::lock_guard<std::mutex> lock(realtimeSequencesMutex);
+		    return realtimeSequences.size() == 5;
+	    }),
+	    "realtime sees five logs"
+	);
 	TraceLogList recent = trace.getLogs();
 	runner.check(
 	    recent.size() == 3 && recent[0].sequence == 3 && recent[1].sequence == 4 && recent[2].sequence == 5,
 	    "recent query returns wrapped records oldest-to-newest"
 	);
-	runner.check(
-	    realtimeSequences.size() == 5 && realtimeSequences[0] == 1 && realtimeSequences[1] == 2 &&
-	        realtimeSequences[2] == 3 && realtimeSequences[3] == 4 && realtimeSequences[4] == 5,
-	    "realtime callback order is oldest-to-newest"
-	);
+	{
+		std::lock_guard<std::mutex> lock(realtimeSequencesMutex);
+		runner.check(
+		    realtimeSequences.size() == 5 && realtimeSequences[0] == 1 && realtimeSequences[1] == 2 &&
+		        realtimeSequences[2] == 3 && realtimeSequences[3] == 4 && realtimeSequences[4] == 5,
+		    "realtime callback order is oldest-to-newest"
+		);
+	}
 	runner.check(trace.flushAndWait(1000), "flush ringOrderAndSequenceConsistency");
 	runner.check(
 	    flushedSequences.size() == 3 && flushedSequences[0] == 3 && flushedSequences[1] == 4 &&
