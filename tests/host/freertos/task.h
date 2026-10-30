@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <mutex>
@@ -83,10 +84,17 @@ inline uint32_t ulTaskNotifyTake(BaseType_t clearOnExit, TickType_t ticksToWait)
 				return control->notifications > 0 || control->deleted;
 			});
 		} else if (ticksToWait > 0) {
-			lock.unlock();
-			trace_host_millis.fetch_add(ticksToWait);
-			std::this_thread::yield();
-			lock.lock();
+			// A timed FreeRTOS wait blocks until notified or its deadline.
+			// Advancing the fake clock without waiting lets the worker exhaust
+			// deadlines before other host threads can be scheduled (especially
+			// with sanitizers enabled).
+			const bool notified = control->condition.wait_for(
+			    lock, std::chrono::milliseconds(ticksToWait), [control]() {
+				    return control->notifications > 0 || control->deleted;
+			    });
+			if (!notified) {
+				trace_host_millis.fetch_add(ticksToWait, std::memory_order_relaxed);
+			}
 		}
 	}
 	if (control->deleted) {
@@ -102,8 +110,15 @@ inline uint32_t ulTaskNotifyTake(BaseType_t clearOnExit, TickType_t ticksToWait)
 }
 
 inline void vTaskDelay(TickType_t ticks) {
-	trace_host_millis.fetch_add(ticks);
-	std::this_thread::yield();
+	if (ticks > 0) {
+		// Keep simulated milliseconds approximately synchronized with real
+		// scheduling. Yielding alone can burn an entire test timeout before
+		// the Trace worker is given CPU time.
+		std::this_thread::sleep_for(std::chrono::milliseconds(ticks));
+		trace_host_millis.fetch_add(ticks, std::memory_order_relaxed);
+	} else {
+		std::this_thread::yield();
+	}
 }
 
 inline void vTaskSuspend(TaskHandle_t handle) {
