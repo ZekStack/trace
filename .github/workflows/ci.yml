@@ -187,6 +187,12 @@ jobs:
         with:
           version: ${{ env.ARDUINO_CLI_VERSION }}
 
+      - name: Create isolated Arduino sketchbook
+        run: |
+          set -euo pipefail
+          SKETCHBOOK_DIR="$(mktemp -d "${RUNNER_TEMP}/trace-arduino-${{ matrix.board.name }}-XXXXXXXX")"
+          echo "ARDUINO_DIRECTORIES_USER=${SKETCHBOOK_DIR}" >> "${GITHUB_ENV}"
+
       - name: Cache Arduino CLI packages
         uses: actions/cache@v4
         with:
@@ -210,7 +216,7 @@ jobs:
       - name: Add local libraries to sketchbook
         run: |
           set -e
-          SKETCHBOOK_DIR="${HOME}/Arduino"
+          SKETCHBOOK_DIR="${ARDUINO_DIRECTORIES_USER}"
           mkdir -p "$SKETCHBOOK_DIR/libraries/Trace"
           rsync -a --delete --exclude ".git" ./ "$SKETCHBOOK_DIR/libraries/Trace/"
           git clone --depth 1 --branch "${STRATA_VERSION}" https://github.com/ZekStack/strata.git "$SKETCHBOOK_DIR/libraries/Strata"
@@ -233,7 +239,7 @@ jobs:
       - name: Add Tempo library to sketchbook
         run: |
           set -e
-          SKETCHBOOK_DIR="${HOME}/Arduino"
+          SKETCHBOOK_DIR="${ARDUINO_DIRECTORIES_USER}"
           git clone --depth 1 https://github.com/ZekStack/tempo.git "$SKETCHBOOK_DIR/libraries/Tempo"
 
       - name: Build Tempo example (${{ matrix.board.name }})
@@ -244,6 +250,13 @@ jobs:
             --fqbn "$FQBN" \
             --build-property "compiler.cpp.extra_flags=-std=gnu++20" \
             "examples/TempoTimestamps"
+
+      - name: Remove isolated Arduino sketchbook
+        if: always()
+        run: |
+          if [ -n "${ARDUINO_DIRECTORIES_USER:-}" ]; then
+            rm -rf -- "${ARDUINO_DIRECTORIES_USER}"
+          fi
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
