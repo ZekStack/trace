@@ -1,5 +1,7 @@
 # Trace
 
+> Current version: **v0.4.0**. The Strata dependency is pinned to **v0.1.4**.
+
 Trace is a logging and diagnostics library for ESP32.
 
 Trace collects structured runtime logs with bounded recent history, bounded realtime delivery, bounded pending flush storage, task-side persistence callbacks, optional Tempo timestamps, and runtime diagnostics. Trace v0.3.0 uses [Strata](https://github.com/ZekStack/strata) for all movable library-owned memory and FreeRTOS storage.
@@ -19,10 +21,10 @@ Trace collects structured runtime logs with bounded recent history, bounded real
 
 ## Dependencies
 
-Trace v0.3.0 requires:
+Trace v0.4.0 requires:
 
 * ArduinoJson v7 or newer.
-* Strata v0.1.2.
+* Strata v0.1.4.
 * C++20.
 
 ### PlatformIO
@@ -34,8 +36,8 @@ board = esp32dev
 framework = arduino
 
 lib_deps =
-  https://github.com/ZekStack/trace.git#v0.3.0
-  https://github.com/ZekStack/strata.git#v0.1.2
+  https://github.com/ZekStack/trace.git#v0.4.0
+  https://github.com/ZekStack/strata.git#v0.1.4
   bblanchon/ArduinoJson@>=7.0.0
 
 build_flags =
@@ -219,7 +221,7 @@ The default storage policy also changes: v0.3.0 prefers external memory for mova
 | Platform | `espressif32` |
 | Language | C++20 |
 | PSRAM | Optional; preferred by default for movable Trace-owned memory |
-| Dependencies | ArduinoJson >= 7.0.0, Strata v0.1.2 |
+| Dependencies | ArduinoJson >= 7.0.0, Strata v0.1.4 |
 | Exceptions in Trace production sources | Not used |
 | Status | v0.3.0 |
 

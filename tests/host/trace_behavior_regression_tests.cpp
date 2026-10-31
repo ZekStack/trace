@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -64,9 +65,9 @@ TraceConfig baseConfig() {
 
 void realtimeWorksWithoutRecent(TestRunner &runner) {
 	resetClock();
-	Trace trace;
 	FakePrint stream;
 	std::atomic<int> observed{0};
+	Trace trace;
 	trace.setStream(&stream);
 	trace.onLog([&observed](const TraceLog &log) {
 		if (log.message == "ready") {
@@ -88,8 +89,8 @@ void realtimeWorksWithoutRecent(TestRunner &runner) {
 
 void smallRecentDoesNotDropRealtime(TestRunner &runner) {
 	resetClock();
-	Trace trace;
 	std::atomic<int> observed{0};
+	Trace trace;
 	trace.onLog([&observed](const TraceLog &) { observed.fetch_add(1); });
 	TraceConfig config = baseConfig();
 	config.maxRecentLogs = 1;
@@ -105,8 +106,8 @@ void smallRecentDoesNotDropRealtime(TestRunner &runner) {
 
 void realtimeOverflowDiagnostics(TestRunner &runner) {
 	resetClock();
-	Trace trace;
 	std::atomic<int> observed{0};
+	Trace trace;
 	trace.onLog([&observed](const TraceLog &) {
 		observed.fetch_add(1);
 		vTaskDelay(1);
@@ -139,8 +140,8 @@ void realtimeDisabledHasNoRealtimeDiagnostics(TestRunner &runner) {
 void pendingOverflowPolicies(TestRunner &runner) {
 	resetClock();
 	{
-		Trace trace;
 		std::vector<uint64_t> flushed;
+		Trace trace;
 		TraceConfig config = baseConfig();
 		config.maxPendingLogs = 2;
 		config.overflowPolicy = TraceOverflowPolicy::DropOldestPending;
@@ -161,8 +162,8 @@ void pendingOverflowPolicies(TestRunner &runner) {
 	}
 	resetClock();
 	{
-		Trace trace;
 		std::vector<uint64_t> flushed;
+		Trace trace;
 		TraceConfig config = baseConfig();
 		config.maxPendingLogs = 2;
 		config.overflowPolicy = TraceOverflowPolicy::DropNewest;
@@ -229,8 +230,8 @@ void blockingAndFlushImmediately(TestRunner &runner) {
 void flushResults(TestRunner &runner) {
 	resetClock();
 	{
-		Trace trace;
 		std::atomic<int> attempts{0};
+		Trace trace;
 		trace.onFlush([&attempts](const TraceLogBatch &) {
 			return attempts.fetch_add(1) == 0 ? TraceFlushResult::Retry : TraceFlushResult::Ok;
 		});
@@ -274,12 +275,16 @@ void flushResults(TestRunner &runner) {
 void retryBackoffRequests(TestRunner &runner) {
 	resetClock();
 	{
-		Trace trace;
 		std::atomic<int> attempts{0};
+		std::mutex attemptTimesMutex;
 		std::vector<uint64_t> attemptTimes;
-		trace.onFlush([&attempts, &attemptTimes](const TraceLogBatch &) {
+		Trace trace;
+		trace.onFlush([&attempts, &attemptTimes, &attemptTimesMutex](const TraceLogBatch &) {
+			{
+				std::lock_guard<std::mutex> lock(attemptTimesMutex);
+				attemptTimes.push_back(trace_host_millis.load());
+			}
 			attempts.fetch_add(1);
-			attemptTimes.push_back(trace_host_millis.load());
 			return TraceFlushResult::Retry;
 		});
 		TraceConfig config = baseConfig();
@@ -294,9 +299,12 @@ void retryBackoffRequests(TestRunner &runner) {
 		TraceResult blocked = trace.info("R", "two");
 		runner.check(!blocked && blocked.status == TraceStatus::Timeout, "normal full-queue request waits for space");
 		bool retrySpacingOk = true;
-		for (size_t i = 1; i < attemptTimes.size(); ++i) {
-			if (attemptTimes[i] < attemptTimes[i - 1] + config.retryIntervalMs) {
-				retrySpacingOk = false;
+		{
+			std::lock_guard<std::mutex> lock(attemptTimesMutex);
+			for (size_t i = 1; i < attemptTimes.size(); ++i) {
+				if (attemptTimes[i] < attemptTimes[i - 1] + config.retryIntervalMs) {
+					retrySpacingOk = false;
+				}
 			}
 		}
 		runner.check(retrySpacingOk, "normal full-queue request does not bypass retry interval");
@@ -304,8 +312,8 @@ void retryBackoffRequests(TestRunner &runner) {
 	}
 	resetClock();
 	{
-		Trace trace;
 		std::atomic<int> attempts{0};
+		Trace trace;
 		trace.onFlush([&attempts](const TraceLogBatch &) {
 			return attempts.fetch_add(1) == 0 ? TraceFlushResult::Retry : TraceFlushResult::Ok;
 		});
@@ -328,9 +336,9 @@ void retryBackoffRequests(TestRunner &runner) {
 
 void callbacksRunOutsideLock(TestRunner &runner) {
 	resetClock();
-	Trace trace;
 	std::atomic<bool> logCallbackOk{false};
 	std::atomic<bool> flushCallbackOk{false};
+	Trace trace;
 	trace.onLog([&trace, &logCallbackOk](const TraceLog &) {
 		TraceDiag diag = trace.getDiagnostics();
 		logCallbackOk.store(diag.recentLogCount > 0);
@@ -350,8 +358,8 @@ void callbacksRunOutsideLock(TestRunner &runner) {
 
 void realtimeDetachStopsFutureRecords(TestRunner &runner) {
 	resetClock();
-	Trace trace;
 	std::atomic<int> observed{0};
+	Trace trace;
 	trace.onLog([&trace, &observed](const TraceLog &) {
 		observed.fetch_add(1);
 		trace.onLog(nullptr);
@@ -428,8 +436,8 @@ void shutdownResults(TestRunner &runner) {
 void cappedFlushBarriers(TestRunner &runner) {
 	resetClock();
 	{
-		Trace trace;
 		std::vector<size_t> batchSizes;
+		Trace trace;
 		trace.onFlush([&batchSizes](const TraceLogBatch &batch) {
 			batchSizes.push_back(batch.size());
 			return TraceFlushResult::Ok;
@@ -448,8 +456,8 @@ void cappedFlushBarriers(TestRunner &runner) {
 
 	resetClock();
 	{
-		Trace trace;
 		std::vector<std::vector<uint64_t>> batches;
+		Trace trace;
 		trace.onFlush([&batches](const TraceLogBatch &batch) {
 			std::vector<uint64_t> sequences;
 			for (const TraceLog &log : batch.logs) {
@@ -477,9 +485,9 @@ void cappedFlushBarriers(TestRunner &runner) {
 
 	resetClock();
 	{
-		Trace trace;
 		std::vector<std::vector<uint64_t>> batches;
 		bool appendedDuringFlush = false;
+		Trace trace;
 		trace.onFlush([&trace, &batches, &appendedDuringFlush](const TraceLogBatch &batch) {
 			std::vector<uint64_t> sequences;
 			for (const TraceLog &log : batch.logs) {
@@ -513,9 +521,9 @@ void cappedFlushBarriers(TestRunner &runner) {
 
 	resetClock();
 	{
-		Trace trace;
 		std::vector<std::vector<uint64_t>> batches;
 		int attempts = 0;
+		Trace trace;
 		trace.onFlush([&batches, &attempts](const TraceLogBatch &batch) {
 			attempts++;
 			std::vector<uint64_t> sequences;
@@ -547,10 +555,10 @@ void cappedFlushBarriers(TestRunner &runner) {
 
 	resetClock();
 	{
-		Trace trace;
 		std::vector<std::vector<uint64_t>> batches;
 		int attempts = 0;
 		bool failSecondBatch = true;
+		Trace trace;
 		trace.onFlush([&batches, &attempts, &failSecondBatch](const TraceLogBatch &batch) {
 			attempts++;
 			std::vector<uint64_t> sequences;
@@ -589,10 +597,14 @@ void cappedFlushBarriers(TestRunner &runner) {
 
 void ringOrderAndSequenceConsistency(TestRunner &runner) {
 	resetClock();
-	Trace trace;
 	std::vector<uint64_t> realtimeSequences;
+	std::mutex realtimeSequencesMutex;
 	std::vector<uint64_t> flushedSequences;
-	trace.onLog([&realtimeSequences](const TraceLog &log) { realtimeSequences.push_back(log.sequence); });
+	Trace trace;
+	trace.onLog([&realtimeSequences, &realtimeSequencesMutex](const TraceLog &log) {
+		std::lock_guard<std::mutex> lock(realtimeSequencesMutex);
+		realtimeSequences.push_back(log.sequence);
+	});
 	trace.onFlush([&flushedSequences](const TraceLogBatch &batch) {
 		for (const TraceLog &log : batch.logs) {
 			flushedSequences.push_back(log.sequence);
@@ -609,17 +621,26 @@ void ringOrderAndSequenceConsistency(TestRunner &runner) {
 	for (int i = 1; i <= 5; ++i) {
 		runner.check(trace.infof("SEQ", "item=%d", i), "sequence log");
 	}
-	runner.check(waitUntil([&realtimeSequences]() { return realtimeSequences.size() == 5; }), "realtime sees five logs");
+	runner.check(
+	    waitUntil([&realtimeSequences, &realtimeSequencesMutex]() {
+		    std::lock_guard<std::mutex> lock(realtimeSequencesMutex);
+		    return realtimeSequences.size() == 5;
+	    }),
+	    "realtime sees five logs"
+	);
 	TraceLogList recent = trace.getLogs();
 	runner.check(
 	    recent.size() == 3 && recent[0].sequence == 3 && recent[1].sequence == 4 && recent[2].sequence == 5,
 	    "recent query returns wrapped records oldest-to-newest"
 	);
-	runner.check(
-	    realtimeSequences.size() == 5 && realtimeSequences[0] == 1 && realtimeSequences[1] == 2 &&
-	        realtimeSequences[2] == 3 && realtimeSequences[3] == 4 && realtimeSequences[4] == 5,
-	    "realtime callback order is oldest-to-newest"
-	);
+	{
+		std::lock_guard<std::mutex> lock(realtimeSequencesMutex);
+		runner.check(
+		    realtimeSequences.size() == 5 && realtimeSequences[0] == 1 && realtimeSequences[1] == 2 &&
+		        realtimeSequences[2] == 3 && realtimeSequences[3] == 4 && realtimeSequences[4] == 5,
+		    "realtime callback order is oldest-to-newest"
+		);
+	}
 	runner.check(trace.flushAndWait(1000), "flush ringOrderAndSequenceConsistency");
 	runner.check(
 	    flushedSequences.size() == 3 && flushedSequences[0] == 3 && flushedSequences[1] == 4 &&
@@ -651,20 +672,35 @@ void runtimeCapClamping(TestRunner &runner) {
 
 int main() {
 	TestRunner runner;
+	std::cerr << "[trace-regression] realtimeWorksWithoutRecent" << std::endl;
 	realtimeWorksWithoutRecent(runner);
+	std::cerr << "[trace-regression] smallRecentDoesNotDropRealtime" << std::endl;
 	smallRecentDoesNotDropRealtime(runner);
+	std::cerr << "[trace-regression] realtimeOverflowDiagnostics" << std::endl;
 	realtimeOverflowDiagnostics(runner);
+	std::cerr << "[trace-regression] realtimeDisabledHasNoRealtimeDiagnostics" << std::endl;
 	realtimeDisabledHasNoRealtimeDiagnostics(runner);
+	std::cerr << "[trace-regression] pendingOverflowPolicies" << std::endl;
 	pendingOverflowPolicies(runner);
+	std::cerr << "[trace-regression] blockingAndFlushImmediately" << std::endl;
 	blockingAndFlushImmediately(runner);
+	std::cerr << "[trace-regression] flushResults" << std::endl;
 	flushResults(runner);
+	std::cerr << "[trace-regression] retryBackoffRequests" << std::endl;
 	retryBackoffRequests(runner);
+	std::cerr << "[trace-regression] callbacksRunOutsideLock" << std::endl;
 	callbacksRunOutsideLock(runner);
+	std::cerr << "[trace-regression] realtimeDetachStopsFutureRecords" << std::endl;
 	realtimeDetachStopsFutureRecords(runner);
+	std::cerr << "[trace-regression] truncation" << std::endl;
 	truncation(runner);
+	std::cerr << "[trace-regression] shutdownResults" << std::endl;
 	shutdownResults(runner);
+	std::cerr << "[trace-regression] cappedFlushBarriers" << std::endl;
 	cappedFlushBarriers(runner);
+	std::cerr << "[trace-regression] ringOrderAndSequenceConsistency" << std::endl;
 	ringOrderAndSequenceConsistency(runner);
+	std::cerr << "[trace-regression] runtimeCapClamping" << std::endl;
 	runtimeCapClamping(runner);
 
 	if (runner.failed != 0) {
